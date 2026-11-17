@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Xtensa toolchain pinned: esp 1.99 currently fails to link esp32s3 images
+  # ("dangerous relocation: l32r: literal placed after use").
+  XTENSA_TOOLCHAIN: "1.98.1.0"
+
+jobs:
+  # Chip independent logic: schema, storage, provisioning flow, CLI.
+  host:
+    name: Host tests, fmt, clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cd esp-hal-provisioning/examples && cargo fmt -- --check
+      - run: cargo clippy -p esp-hal-provisioning --no-default-features --features cli,flash-store,sdcard,ble --all-targets -- -D warnings
+      - run: cargo clippy -p esp-hal-provisioning --no-default-features --features file --all-targets -- -D warnings
+      - run: cargo test -p esp-hal-provisioning --no-default-features --features cli,flash-store,sdcard,ble
+      - run: cargo test -p esp-hal-provisioning --no-default-features --features file
+
+  # The library itself, for every chip and relevant feature set.
+  lib:
+    name: Lib ${{ matrix.chip }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { chip: esp32,   target: xtensa-esp32-none-elf,         xtensa: true,  features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32c2, target: riscv32imc-unknown-none-elf,   xtensa: false, features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32c3, target: riscv32imc-unknown-none-elf,   xtensa: false, features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32c5, target: riscv32imac-unknown-none-elf,  xtensa: false, features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32c6, target: riscv32imac-unknown-none-elf,  xtensa: false, features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32c61, target: riscv32imac-unknown-none-elf, xtensa: false, features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32h2, target: riscv32imac-unknown-none-elf,  xtensa: false, features: "cli,sdcard,esp-flash,esp-ble" }
+          - { chip: esp32p4, target: riscv32imafc-unknown-none-elf, xtensa: false, features: "cli,sdcard,esp-flash" }
+          - { chip: esp32s2, target: xtensa-esp32s2-none-elf,       xtensa: true,  features: "wifi,cli,sdcard,esp-flash" }
+          - { chip: esp32s3, target: xtensa-esp32s3-none-elf,       xtensa: true,  features: "wifi,cli,sdcard,esp-flash,coex" }
+          - { chip: esp32s31, target: riscv32imafc-unknown-none-elf, xtensa: false, features: "wifi,cli,sdcard,esp-flash" }
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ !matrix.xtensa }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rust-src
+      - if: ${{ matrix.xtensa }}
+        uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          default: true
+          buildtargets: ${{ matrix.chip }}
+          version: ${{ env.XTENSA_TOOLCHAIN }}
+          ldproxy: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lib-${{ matrix.chip }}
+      - name: Clippy (log)
+        run: >-
+          cargo clippy -p esp-hal-provisioning --target ${{ matrix.target }}
+          ${{ matrix.xtensa && '-Zbuild-std=core,alloc' || '' }}
+          --no-default-features --features ${{ matrix.chip }},${{ matrix.features }},log-04
+          -- -D warnings
+      - name: Clippy (defmt)
+        run: >-
+          cargo clippy -p esp-hal-provisioning --target ${{ matrix.target }}
+          ${{ matrix.xtensa && '-Zbuild-std=core,alloc' || '' }}
+          --no-default-features --features ${{ matrix.chip }},${{ matrix.features }},defmt
+          -- -D warnings
+
+  # Firmware examples for every chip.
+  # esp32 (classic) builds without BLE: esp-radio 1.0.0-beta.1 fails to link
+  # BLE there (missing `ld_*_evt_start_cbk` controller symbols).
+  examples:
+    name: Examples ${{ matrix.chip }}${{ matrix.extra && format(' ({0})', matrix.extra) || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { chip: esp32,   target: xtensa-esp32-none-elf,         xtensa: true,  features: "wifi,sdcard,sdmmc" }
+          - { chip: esp32c2, target: riscv32imc-unknown-none-elf,   xtensa: false, features: "wifi,sdcard,coex" }
+          - { chip: esp32c3, target: riscv32imc-unknown-none-elf,   xtensa: false, features: "wifi,sdcard,coex" }
+          - { chip: esp32c3, target: riscv32imc-unknown-none-elf,   xtensa: false, features: "wifi,usb-serial-jtag", extra: usb-serial-jtag }
+          - { chip: esp32c5, target: riscv32imac-unknown-none-elf,  xtensa: false, features: "wifi,sdcard,coex" }
+          - { chip: esp32c6, target: riscv32imac-unknown-none-elf,  xtensa: false, features: "wifi,sdcard,coex" }
+          - { chip: esp32c61, target: riscv32imac-unknown-none-elf, xtensa: false, features: "wifi,sdcard,coex" }
+          - { chip: esp32h2, target: riscv32imac-unknown-none-elf,  xtensa: false, features: "sdcard,ble" }
+          - { chip: esp32p4, target: riscv32imafc-unknown-none-elf, xtensa: false, features: "sdcard,sdmmc" }
+          - { chip: esp32s2, target: xtensa-esp32s2-none-elf,       xtensa: true,  features: "wifi,sdcard" }
+          - { chip: esp32s3, target: xtensa-esp32s3-none-elf,       xtensa: true,  features: "wifi,sdcard,sdmmc,coex" }
+          - { chip: esp32s31, target: riscv32imafc-unknown-none-elf, xtensa: false, features: "wifi,sdcard,sdmmc" }
+    defaults:
+      run:
+        working-directory: esp-hal-provisioning/examples
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ !matrix.xtensa }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rust-src
+      - if: ${{ matrix.xtensa }}
+        uses: esp-rs/xtensa-toolchain@v1.6
+        with:
+          default: true
+          buildtargets: ${{ matrix.chip }}
+          version: ${{ env.XTENSA_TOOLCHAIN }}
+          ldproxy: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-hal-provisioning/examples
+          key: examples-${{ matrix.chip }}-${{ matrix.extra }}
+      - name: Build examples
+        run: >-
+          cargo build --release --bins --target ${{ matrix.target }}
+          --features ${{ matrix.chip }}${{ matrix.features && format(',{0}', matrix.features) || '' }}

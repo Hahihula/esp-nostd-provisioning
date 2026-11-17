@@ -1,0 +1,99 @@
+[package]
+name          = "esp-hal-provisioning"
+version       = "0.1.0"
+edition       = "2024"
+rust-version  = "1.88"
+description   = "Async, schema-driven device provisioning (Wi-Fi and custom settings) for esp-hal"
+readme        = "README.md"
+keywords      = ["embedded", "esp32", "provisioning", "wifi", "no-std"]
+categories    = ["embedded", "no-std", "network-programming"]
+repository    = "https://github.com/esp-rs/esp-hal-community"
+license       = "MIT OR Apache-2.0"
+
+[package.metadata.docs.rs]
+features = ["esp32c3", "cli", "sdcard", "wifi", "flash-store", "esp-flash"]
+targets  = ["riscv32imc-unknown-none-elf"]
+
+[dependencies]
+embassy-futures        = "0.1.2"
+embassy-time           = "0.5.1"
+embedded-io-async      = { version = "0.7.0", optional = true }
+embedded-hal           = "1.0.0"
+embedded-storage-async = { version = "0.4.2", optional = true }
+sequential-storage     = { version = "8.0.2", optional = true, features = ["alloc"] }
+zeroize                = { version = "1.8", default-features = false, features = ["alloc"] }
+
+embedded-sdmmc      = { version = "0.10.0", optional = true, default-features = false }
+block-device-driver = { version = "0.2.0", optional = true }
+aligned             = { version = "0.4.3", optional = true }
+
+# BLE: trouble-host 0.7 matches the bt-hci 0.9 used by esp-radio 1.0 betas.
+trouble-host = { version = "0.7.0", optional = true, default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool"] }
+heapless     = { version = "0.9", optional = true }
+embassy-sync = { version = "0.8", optional = true }
+
+# esp-radio's Wi-Fi driver requires the unstable esp-hal API.
+esp-hal   = { version = "1.2.2", optional = true, features = ["unstable"] }
+esp-storage            = { version = "0.10.0", optional = true, features = ["embedded-storage"] }
+esp-bootloader-esp-idf = { version = "0.6.0", optional = true }
+embassy-embedded-hal   = { version = "0.6.0", optional = true, default-features = false }
+esp-radio = { version = "1.0.0-beta.1", optional = true, default-features = false, features = ["esp-alloc", "unstable"] }
+
+defmt = { version = "1.0.1", optional = true }
+log   = { version = "0.4.27", optional = true }
+
+[dev-dependencies]
+embassy-time = { version = "0.5.1", features = ["std", "generic-queue-8"] }
+futures      = { version = "0.3", default-features = false, features = ["executor"] }
+
+[features]
+default = ["wifi", "cli", "flash-store", "esp-flash"]
+
+# --- Provisioning paths -----------------------------------------------------
+## Interactive provisioning over a serial console (UART or USB-Serial-JTAG).
+cli = ["dep:embedded-io-async"]
+
+## Provisioning from a text file on any `file::FileSystem`.
+file = []
+## FAT formatted SD cards (SPI or SDMMC) via `embedded-sdmmc`.
+sdcard = ["file", "dep:embedded-sdmmc", "dep:block-device-driver", "dep:aligned"]
+
+## Provisioning over BLE (GATT + Web Bluetooth page), generic over a `trouble-host` controller.
+ble = ["dep:trouble-host", "dep:heapless", "dep:embassy-sync"]
+## `ble::controller()`: BLE on the chip's radio via `esp-radio` (requires a chip with BLE).
+esp-ble = ["ble", "dep:esp-radio", "esp-radio?/ble", "dep:esp-hal"]
+## Wi-Fi/BLE coexistence, required when verifying Wi-Fi while a BLE client is connected.
+coex = ["wifi", "esp-ble", "esp-radio?/coex"]
+
+# --- Payloads ---------------------------------------------------------------
+## Built-in Wi-Fi schema, scanning and credential verification (requires a chip feature).
+wifi = ["dep:esp-radio", "esp-radio?/wifi", "dep:esp-hal"]
+
+# --- Storage ----------------------------------------------------------------
+## Persist values in a flash partition using `sequential-storage`.
+flash-store = ["dep:sequential-storage", "dep:embedded-storage-async"]
+## `store::nvs_store()`: a `FlashStore` on the internal flash `nvs` partition (requires a chip).
+esp-flash = [
+  "flash-store",
+  "dep:esp-hal",
+  "dep:esp-storage",
+  "dep:esp-bootloader-esp-idf",
+  "dep:embassy-embedded-hal",
+]
+
+# --- Logging ----------------------------------------------------------------
+defmt  = ["dep:defmt", "trouble-host?/defmt", "embedded-sdmmc?/defmt-log", "sequential-storage?/defmt", "esp-storage?/defmt", "esp-radio?/defmt", "esp-hal?/defmt", "esp-bootloader-esp-idf?/defmt"]
+log-04 = ["dep:log", "trouble-host?/log", "embedded-sdmmc?/log", "esp-radio?/log-04", "esp-hal?/log-04", "esp-bootloader-esp-idf?/log-04"]
+
+# --- Chips (select exactly one when using `wifi`) ---------------------------
+esp32 = ["esp-radio?/esp32", "esp-hal?/esp32", "esp-storage?/esp32", "esp-bootloader-esp-idf?/esp32"]
+esp32c2 = ["esp-radio?/esp32c2", "esp-hal?/esp32c2", "esp-storage?/esp32c2", "esp-bootloader-esp-idf?/esp32c2"]
+esp32c3 = ["esp-radio?/esp32c3", "esp-hal?/esp32c3", "esp-storage?/esp32c3", "esp-bootloader-esp-idf?/esp32c3"]
+esp32c5 = ["esp-radio?/esp32c5", "esp-hal?/esp32c5", "esp-storage?/esp32c5", "esp-bootloader-esp-idf?/esp32c5"]
+esp32c6 = ["esp-radio?/esp32c6", "esp-hal?/esp32c6", "esp-storage?/esp32c6", "esp-bootloader-esp-idf?/esp32c6"]
+esp32c61 = ["esp-radio?/esp32c61", "esp-hal?/esp32c61", "esp-storage?/esp32c61", "esp-bootloader-esp-idf?/esp32c61"]
+esp32h2 = ["esp-radio?/esp32h2", "esp-hal?/esp32h2", "esp-storage?/esp32h2", "esp-bootloader-esp-idf?/esp32h2"]
+esp32p4 = ["esp-hal?/esp32p4", "esp-storage?/esp32p4", "esp-bootloader-esp-idf?/esp32p4"]
+esp32s2 = ["esp-radio?/esp32s2", "esp-hal?/esp32s2", "esp-storage?/esp32s2", "esp-bootloader-esp-idf?/esp32s2"]
+esp32s3 = ["esp-radio?/esp32s3", "esp-hal?/esp32s3", "esp-storage?/esp32s3", "esp-bootloader-esp-idf?/esp32s3"]
+esp32s31 = ["esp-radio?/esp32s31", "esp-hal?/esp32s31", "esp-storage?/esp32s31", "esp-bootloader-esp-idf?/esp32s31"]

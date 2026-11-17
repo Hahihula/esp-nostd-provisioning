@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members  = ["esp-hal-provisioning"]
+# Firmware examples are built per chip / target, so they live outside the
+# host workspace (see `esp-hal-provisioning/examples/README.md`).
+exclude  = ["esp-hal-provisioning/examples"]
