@@ -36,8 +36,8 @@ they stop working, provisioning starts again.
 
 Network
   Wi-Fi network (SSID) to connect to
-   1) HomeNetwork                       -42 dBm [####] secured
-   2) Office                            -61 dBm [### ] secured
+   1) HomeNetwork                       -42 dBm [####] WPA2
+   2) Office                            -61 dBm [### ] WPA3
    3) Guest                             -77 dBm [##  ] open
   Enter 1-3 or type a value
 > 1
@@ -70,7 +70,8 @@ let settings = provision(&MQTT, &mut store, &mut cli, &mut NoVerify, &Options::d
 let host = settings.get("host").unwrap();
 ```
 
-Field types: `text`, `secret` (masked, never logged, zeroed on drop), `integer`
+Field types: `text`, `secret` (masked, never logged, zeroed on drop — see
+[Secrets](#secrets)), `integer`
 (range checked), `boolean`, and `choice` (options supplied at runtime, e.g.
 scan results). Each field can be `.optional()`, have `.with_len(min, max)` and
 a custom `.with_validator(fn)`.
@@ -119,7 +120,8 @@ port = 1883
   password), the reason is written to **`SETUPERR.TXT`** and the device waits
   for the file to change.
 - After success the section is **removed** from the card (the file is deleted
-  when nothing else is left) and its old contents are overwritten in place.
+  when nothing else is left) and its old contents are overwritten in place
+  (best effort, see [Secrets](#secrets)).
   See `AfterUse` for other policies.
 
 ```rust,ignore
@@ -172,8 +174,10 @@ password) live, and the device keeps the connection open while it verifies.
   coexistence).
 - **`ble::run` owns the BLE stack** for as long as your closure runs. It can be
   called again later (e.g. for re-provisioning from your API).
-- **Security:** protocol v1 sends values unencrypted. Provision in a trusted
-  environment.
+- **Security:** protocol v1 has no pairing and no encryption. Anyone in radio
+  range can read the values while provisioning runs, and can also **write**
+  values (i.e. provision the device before you do). Only run BLE provisioning
+  when needed (e.g. after a button press) and in a trusted environment.
 - **Chips:** esp32c2, esp32c3, esp32c5, esp32c6, esp32c61, esp32h2, esp32s3.
   The classic esp32 currently fails to link BLE with esp-radio 1.0.0-beta.1, and
   esp-radio does not support BLE on the esp32s31 yet.
@@ -194,7 +198,27 @@ partition of the default partition table (`sequential-storage` key/value map
 with wear levelling). Use `store::partition_store(flash, "label")` for a custom
 partition, or implement the `Store` trait yourself.
 
-> The on-flash format is **not** compatible with ESP-IDF NVS.
+> ⚠️ The on-flash format is **not** compatible with ESP-IDF NVS. `nvs_store`
+> **erases** whatever ESP-IDF/Arduino firmware stored in the `nvs` partition.
+> If the device also runs ESP-IDF code or keeps data there, add a dedicated
+> partition to your partition table and use `partition_store` instead.
+
+Do not cancel `provision()` (e.g. with `with_timeout`) while it saves values;
+use `max_attempts` to bound a session instead.
+
+## Secrets
+
+Secret handling is **best effort**:
+
+- Secrets are masked on input, never logged, and kept in `Zeroizing`
+  buffers that are wiped on drop. Copies made while a value is processed
+  (e.g. when a `String` grows) can still leave fragments in freed heap memory.
+- The flash store wipes its scratch buffer after each access; values are
+  stored in plain text in flash (use flash encryption to protect them).
+- The SD card transport overwrites the file in place before rewriting or
+  deleting it, but the card's controller may keep old copies in blocks it
+  remapped internally.
+- `MemoryStore` (for tests and demos) keeps plain `String`s.
 
 ## Re-provisioning
 

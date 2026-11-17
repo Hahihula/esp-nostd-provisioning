@@ -6,7 +6,9 @@
 //! description, choice fields list their options as a numbered menu, and
 //! secrets are masked while typing.
 //!
-//! Press Ctrl-C at any prompt to start over.
+//! Press Ctrl-C at any prompt to start over. There is no way to abort
+//! provisioning from the console; bound it with
+//! [`Options::max_attempts`](crate::Options::max_attempts) if needed.
 
 use alloc::{format, string::String, vec::Vec};
 
@@ -48,6 +50,12 @@ enum Prompt {
     Restart,
 }
 
+enum Input {
+    Line(String),
+    Cancelled,
+    InvalidUtf8,
+}
+
 impl<IO: Read + Write> Cli<IO> {
     /// Create a CLI transport with the default configuration.
     pub fn new(io: IO) -> Self {
@@ -73,19 +81,23 @@ impl<IO: Read + Write> Cli<IO> {
         self.io.flush().await
     }
 
-    async fn read(&mut self, max: usize, echo: Echo) -> Result<Option<String>, IO::Error> {
+    async fn read(&mut self, max: usize, echo: Echo) -> Result<Input, IO::Error> {
         let mut buf = Vec::new();
         let line = self
             .reader
             .read_line(&mut self.io, &mut buf, max, echo)
             .await;
-        let result = match line? {
-            Line::Done => Some(String::from_utf8(core::mem::take(&mut buf)).unwrap_or_default()),
-            Line::Cancelled => None,
+        let result = match line {
+            Ok(Line::Done) => match core::str::from_utf8(&buf) {
+                Ok(text) => Ok(Input::Line(String::from(text))),
+                Err(_) => Ok(Input::InvalidUtf8),
+            },
+            Ok(Line::Cancelled) => Ok(Input::Cancelled),
+            Err(e) => Err(e),
         };
         // Wipe a potential secret from the scratch buffer.
         buf.iter_mut().for_each(|b| *b = 0);
-        Ok(result)
+        result
     }
 
     async fn prompt_field(
@@ -143,8 +155,14 @@ impl<IO: Read + Write> Cli<IO> {
         };
         loop {
             self.print("> ").await?;
-            let Some(input) = self.read(MAX_VALUE_LEN as usize, echo).await? else {
-                return Ok(Prompt::Restart);
+            let input = match self.read(MAX_VALUE_LEN as usize, echo).await? {
+                Input::Line(input) => input,
+                Input::Cancelled => return Ok(Prompt::Restart),
+                Input::InvalidUtf8 => {
+                    self.print("  ! invalid characters, please type it again\r\n")
+                        .await?;
+                    continue;
+                }
             };
 
             let value = if input.trim().is_empty() && current.is_some() {
@@ -190,8 +208,10 @@ impl<IO: Read + Write> Cli<IO> {
         summary.push_str("Save? [Y/n] ");
         self.print(&summary).await?;
         loop {
-            let Some(answer) = self.read(8, Echo::Plain).await? else {
-                return Ok(None);
+            let answer = match self.read(8, Echo::Plain).await? {
+                Input::Line(answer) => answer,
+                Input::Cancelled => return Ok(None),
+                Input::InvalidUtf8 => String::new(),
             };
             match answer.trim() {
                 "" => return Ok(Some(true)),
@@ -390,6 +410,28 @@ pub(crate) mod tests {
         assert_eq!(v.get("net"), Some("home"));
         assert_eq!(v.get("port"), Some("81"));
         assert_eq!(out.matches("=== Device provisioning ===").count(), 3);
+    }
+
+    #[test]
+    fn invalid_utf8_is_asked_again() {
+        // 0xff can never appear in UTF-8: typed as a password it must be
+        // rejected, not silently turned into an empty (open network) value.
+        let mut input = b"1\r".to_vec();
+        input.extend_from_slice(b"pass\xffword\r");
+        input.extend_from_slice(b"password1\r80\ry\r\r");
+        block_on(async {
+            let mut store = MemoryStore::new();
+            let mut cli = Cli::new(MockIo::new(&input));
+            let opts = Options {
+                force: true,
+                ..Default::default()
+            };
+            let v = provision(&SCHEMA, &mut store, &mut cli, &mut NoVerify, &opts)
+                .await
+                .unwrap();
+            assert_eq!(v.get("pw"), Some("password1"));
+            assert!(cli.into_inner().output().contains("invalid characters"));
+        });
     }
 
     #[test]

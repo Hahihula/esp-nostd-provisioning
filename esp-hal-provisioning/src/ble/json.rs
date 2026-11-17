@@ -40,6 +40,10 @@ impl Json {
 }
 
 const MAX_DEPTH: usize = 8;
+/// Maximum number of entries in one object or array.
+const MAX_ENTRIES: usize = 64;
+/// Maximum length of a number literal.
+const MAX_NUMBER_LEN: usize = 32;
 
 /// Parse a JSON document.
 pub fn parse(input: &str) -> Result<Json, &'static str> {
@@ -106,6 +110,9 @@ impl Parser<'_> {
                         return Err("expected ':' in object");
                     }
                     let value = self.value(depth + 1)?;
+                    if entries.len() == MAX_ENTRIES {
+                        return Err("too many entries in object");
+                    }
                     entries.push((key, value));
                     self.ws();
                     if self.eat(b',') {
@@ -125,6 +132,9 @@ impl Parser<'_> {
                     return Ok(Json::Array(items));
                 }
                 loop {
+                    if items.len() == MAX_ENTRIES {
+                        return Err("too many entries in array");
+                    }
                     items.push(self.value(depth + 1)?);
                     self.ws();
                     if self.eat(b',') {
@@ -140,19 +150,46 @@ impl Parser<'_> {
             Some(b't') => self.literal("true", Json::Bool(true)),
             Some(b'f') => self.literal("false", Json::Bool(false)),
             Some(b'n') => self.literal("null", Json::Null),
-            Some(b'-' | b'0'..=b'9') => {
-                let start = self.i;
-                while matches!(
-                    self.s.get(self.i),
-                    Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
-                ) {
-                    self.i += 1;
-                }
-                let text =
-                    core::str::from_utf8(&self.s[start..self.i]).map_err(|_| "invalid number")?;
-                Ok(Json::Number(String::from(text)))
-            }
+            Some(b'-' | b'0'..=b'9') => self.number(),
             _ => Err("unexpected character"),
+        }
+    }
+
+    /// `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`
+    fn number(&mut self) -> Result<Json, &'static str> {
+        let start = self.i;
+        self.eat(b'-');
+        match self.s.get(self.i) {
+            Some(b'0') => self.i += 1,
+            Some(b'1'..=b'9') => self.digits(),
+            _ => return Err("invalid number"),
+        }
+        if self.eat(b'.') {
+            if !matches!(self.s.get(self.i), Some(b'0'..=b'9')) {
+                return Err("invalid number");
+            }
+            self.digits();
+        }
+        if self.eat(b'e') || self.eat(b'E') {
+            if !self.eat(b'+') {
+                self.eat(b'-');
+            }
+            if !matches!(self.s.get(self.i), Some(b'0'..=b'9')) {
+                return Err("invalid number");
+            }
+            self.digits();
+        }
+        if self.i - start > MAX_NUMBER_LEN {
+            return Err("number too long");
+        }
+        // Only ASCII digits and signs were consumed.
+        let text = core::str::from_utf8(&self.s[start..self.i]).map_err(|_| "invalid number")?;
+        Ok(Json::Number(String::from(text)))
+    }
+
+    fn digits(&mut self) {
+        while matches!(self.s.get(self.i), Some(b'0'..=b'9')) {
+            self.i += 1;
         }
     }
 
@@ -280,11 +317,26 @@ mod tests {
             r#"{"a":1} x"#,
             "\"\u{1}\"",
             r#""\ud800""#,
+            "1-2+3e",
+            "01",
+            "1.",
+            "1e",
+            "-",
+            "123456789012345678901234567890123",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
         let deep = "[".repeat(20) + &"]".repeat(20);
         assert!(parse(&deep).is_err());
+        let wide = alloc::format!("[{}0]", "0,".repeat(MAX_ENTRIES));
+        assert!(parse(&wide).is_err());
+    }
+
+    #[test]
+    fn valid_numbers() {
+        for good in ["0", "-1", "1883", "1.5", "-0.25e+3", "2E-2"] {
+            assert_eq!(parse(good), Ok(Json::Number(good.into())), "{good}");
+        }
     }
 
     #[test]

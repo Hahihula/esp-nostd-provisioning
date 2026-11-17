@@ -1,7 +1,7 @@
 //! Provisioning transports and value verification.
 
 use alloc::{string::String, vec::Vec};
-use core::fmt::Debug;
+use core::{fmt::Debug, pin::pin};
 
 use embassy_futures::select::{Either, select};
 
@@ -97,13 +97,33 @@ pub enum EitherError<A, B> {
 /// Run two transports concurrently; the first one to deliver values wins.
 ///
 /// Nest tuples to combine more: `(cli, (sdcard, ble))`.
+///
+/// When one transport fails, the other one keeps going; an error is only
+/// returned if both fail. The losing transport's `collect` future is dropped
+/// as soon as the winner delivers, so `collect` implementations must be
+/// cancellation safe (keep no half-finished state that matters across calls).
 impl<A: Transport, B: Transport> Transport for (A, B) {
     type Error = EitherError<A::Error, B::Error>;
 
     async fn collect(&mut self, request: &Request<'_>) -> Result<Values, Self::Error> {
-        match select(self.0.collect(request), self.1.collect(request)).await {
-            Either::First(r) => r.map_err(EitherError::First),
-            Either::Second(r) => r.map_err(EitherError::Second),
+        let mut a = pin!(self.0.collect(request));
+        let mut b = pin!(self.1.collect(request));
+        match select(&mut a, &mut b).await {
+            Either::First(Ok(values)) | Either::Second(Ok(values)) => Ok(values),
+            Either::First(Err(e)) => {
+                warn!(
+                    "transport failed, continuing with the other one: {}",
+                    alloc::format!("{e:?}").as_str()
+                );
+                b.await.map_err(EitherError::Second)
+            }
+            Either::Second(Err(e)) => {
+                warn!(
+                    "transport failed, continuing with the other one: {}",
+                    alloc::format!("{e:?}").as_str()
+                );
+                a.await.map_err(EitherError::First)
+            }
         }
     }
 
@@ -128,16 +148,28 @@ impl core::fmt::Display for VerifyError {
     }
 }
 
+/// Runtime options of choice fields, as `(field key, options)`.
+pub type Choices = Vec<(&'static str, Vec<Choice>)>;
+
 /// Checks that collected values actually work before they are saved
 /// (e.g. by connecting to the Wi-Fi network).
 pub trait Verify {
     /// Verify `values`. On error the user is asked again.
     async fn verify(&mut self, values: &Values) -> Result<(), VerifyError>;
+
+    /// Called after [`verify`](Self::verify) rejected values, before the user
+    /// is asked again: update the runtime options of choice fields (e.g.
+    /// rescan Wi-Fi networks). Runs inside [`Transport::while_verifying`].
+    async fn refresh_choices(&mut self, _choices: &mut Choices) {}
 }
 
 impl<V: Verify + ?Sized> Verify for &mut V {
     async fn verify(&mut self, values: &Values) -> Result<(), VerifyError> {
         (**self).verify(values).await
+    }
+
+    async fn refresh_choices(&mut self, choices: &mut Choices) {
+        (**self).refresh_choices(choices).await
     }
 }
 

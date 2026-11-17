@@ -22,3 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `coex` feature for Wi-Fi verification over BLE.
 - Support for all chips of `esp-hal` 1.2: esp32, esp32c2, esp32c3, esp32c5, esp32c6, esp32c61, esp32h2, esp32p4, esp32s2, esp32s3, esp32s31.
 - Re-provisioning triggers: `force` option, `store::clear()`, `trigger::button_held()`, and fallback after failed connection attempts.
+- `Verify::refresh_choices`: the Wi-Fi verifier rescans networks after a failed attempt.
+- `wifi::Security` in scan results (shown as open/WEP/WPA2/WPA3); enterprise, OWE and other networks that a password cannot unlock are no longer offered.
+- `WifiConfig::retry_delay`: growing pause between connection attempts with stored credentials.
+- `store::load_partial()`; still valid stored values are offered as defaults when the schema changed.
+- `FileSystem::error_reason` (user-fixable read errors, such as a file that is too large, are reported to `SETUPERR.TXT`) and `SdFileSystem::on_success`.
+- Compile-time checks in `Schema::new` (storage key length, duplicate keys) and `Field::with_len` (min ≤ max).
+
+### Changed
+
+- A tuple transport keeps running when one of its transports fails; it only fails when both do.
+- After a failed verification the rejected values are offered as defaults on the next attempt.
+- Choice fields without `allow_custom` are checked against the offered options in the core, for every transport.
+- `FlashStore` uses a word-aligned scratch buffer (avoids a 4 KiB stack fallback in `esp-storage`) sized from `sequential-storage`'s item overhead.
+- The file transport retries rejected content and rewrites the template after the card was removed and re-inserted.
+- The BLE JSON parser enforces the JSON number grammar and limits entries per object/array; `set` messages with more values than the schema has fields are rejected.
+
+### Fixed
+
+- The CLI no longer turns input with invalid UTF-8 into an empty value (an open Wi-Fi network); it asks again. Length limits no longer split a character.
+- `wifi::connect` disconnects after every failed attempt, not only after timeouts.
+- Partition end address overflow check in `store::partition_store()`/`nvs_store()`.

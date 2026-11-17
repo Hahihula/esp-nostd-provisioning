@@ -271,7 +271,15 @@ $("form").addEventListener("submit", async (event) => {
     const field = schema.fields.find((f) => f.key === el.dataset.key);
     if (el.type === "checkbox") values[field.key] = el.checked;
     else if (field.kind === "secret" && field.has_value && el.value === "") continue; // keep current
-    else values[field.key] = el.value;
+    else {
+      // The device limits are in bytes; maxLength counts UTF-16 units.
+      if (field.max_len && enc.encode(el.value).length > field.max_len) {
+        setStatus("err", field.name + ": at most " + field.max_len + " bytes (non-ASCII characters take several).");
+        el.focus();
+        return;
+      }
+      values[field.key] = el.value;
+    }
   }
   $("submit").disabled = true;
   setStatus("info", "Sending…");

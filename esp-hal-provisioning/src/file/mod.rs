@@ -51,6 +51,13 @@ pub trait FileSystem {
     /// Delete the file (overwriting its contents first where possible).
     /// Deleting a missing file is not an error.
     async fn remove(&mut self, name: &str) -> Result<(), Self::Error>;
+
+    /// A user-fixable reason for a failed [`read`](Self::read) (e.g. the file
+    /// is too large), reported to the error file. `None` (the default) means
+    /// the medium is unavailable, e.g. no card inserted.
+    fn error_reason(_error: &Self::Error) -> Option<&'static str> {
+        None
+    }
 }
 
 impl<F: FileSystem + ?Sized> FileSystem for &mut F {
@@ -66,6 +73,10 @@ impl<F: FileSystem + ?Sized> FileSystem for &mut F {
 
     async fn remove(&mut self, name: &str) -> Result<(), Self::Error> {
         (**self).remove(name).await
+    }
+
+    fn error_reason(error: &Self::Error) -> Option<&'static str> {
+        F::error_reason(error)
     }
 }
 
@@ -113,9 +124,13 @@ pub struct FileTransport<F> {
     config: FileConfig,
     /// Hash of the content last handed out by `collect`.
     returned: Option<u64>,
-    /// Hash of content that was rejected; ignored until the file changes.
+    /// Hash of content that was rejected; ignored until the file changes or
+    /// the card is re-inserted.
     rejected: Option<u64>,
+    /// Template already written (re-armed when the card goes away).
     template_written: bool,
+    /// Last reported read error, so it is reported once.
+    read_error: Option<&'static str>,
 }
 
 impl<F: FileSystem> FileTransport<F> {
@@ -132,6 +147,7 @@ impl<F: FileSystem> FileTransport<F> {
             returned: None,
             rejected: None,
             template_written: false,
+            read_error: None,
         }
     }
 
@@ -179,11 +195,33 @@ impl<F: FileSystem> FileTransport<F> {
                 self.write_template(None, request).await;
                 return None;
             }
-            Err(_) => {
-                debug!("provisioning file not readable (no card?)");
+            Err(e) => {
+                match F::error_reason(&e) {
+                    Some(reason) => {
+                        if self.read_error != Some(reason) {
+                            self.read_error = Some(reason);
+                            self.report(
+                                request.schema,
+                                &format!("{}: {reason}", self.config.file_name),
+                            )
+                            .await;
+                        }
+                    }
+                    None => {
+                        debug!("provisioning file not readable (no card?)");
+                        // A card was removed: treat whatever comes next as new,
+                        // even if it holds the same content (e.g. the router
+                        // was off during the first try), and write the template
+                        // to a different blank card.
+                        self.rejected = None;
+                        self.template_written = false;
+                        self.read_error = None;
+                    }
+                }
                 return None;
             }
         };
+        self.read_error = None;
 
         let hash = fnv1a(&bytes);
         if Some(hash) == self.rejected {
@@ -539,6 +577,105 @@ mod tests {
             &mut NoVerify,
         );
         assert_eq!(fs.file("SETUP.TXT"), None);
+    }
+
+    /// File system whose card can be pulled out.
+    #[derive(Clone, Default)]
+    struct Removable {
+        fs: MemFs,
+        absent: Rc<RefCell<bool>>,
+    }
+    impl FileSystem for Removable {
+        type Error = &'static str;
+        async fn read(&mut self, name: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            if *self.absent.borrow() {
+                return Err("no card");
+            }
+            Ok(self.fs.read(name).await.unwrap())
+        }
+        async fn write(&mut self, n: &str, d: &[u8]) -> Result<(), Self::Error> {
+            self.fs.write(n, d).await.unwrap();
+            Ok(())
+        }
+        async fn remove(&mut self, n: &str) -> Result<(), Self::Error> {
+            self.fs.remove(n).await.unwrap();
+            Ok(())
+        }
+    }
+
+    fn request() -> Request<'static> {
+        Request {
+            schema: &WIFI,
+            choices: &[],
+            current: None,
+            attempt: 1,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn reinserting_the_card_retries_rejected_content() {
+        let fs = Removable::default();
+        fs.fs.put("SETUP.TXT", "[wifi]\nsid = home\n");
+        let mut t = FileTransport::with_config(fs.clone(), fast());
+        let req = request();
+        assert!(block_on(t.poll(&req)).is_none());
+        fs.fs.files.borrow_mut().remove("SETUPERR.TXT");
+        assert!(block_on(t.poll(&req)).is_none());
+        assert_eq!(fs.fs.file("SETUPERR.TXT"), None, "not re-reported");
+        // Card out and back in with the same content: it is looked at again.
+        *fs.absent.borrow_mut() = true;
+        assert!(block_on(t.poll(&req)).is_none());
+        *fs.absent.borrow_mut() = false;
+        assert!(block_on(t.poll(&req)).is_none());
+        assert!(fs.fs.file("SETUPERR.TXT").is_some(), "reported again");
+    }
+
+    #[test]
+    fn template_is_written_to_each_new_blank_card() {
+        let fs = Removable::default();
+        let mut t = FileTransport::with_config(fs.clone(), fast());
+        let req = request();
+        assert!(block_on(t.poll(&req)).is_none());
+        assert!(fs.fs.file("SETUP.TXT").is_some());
+        // Swap in a blank card.
+        *fs.absent.borrow_mut() = true;
+        assert!(block_on(t.poll(&req)).is_none());
+        fs.fs.files.borrow_mut().clear();
+        *fs.absent.borrow_mut() = false;
+        assert!(block_on(t.poll(&req)).is_none());
+        assert!(fs.fs.file("SETUP.TXT").is_some(), "template written again");
+    }
+
+    #[test]
+    fn user_fixable_read_errors_are_reported_once() {
+        #[derive(Clone, Default)]
+        struct TooLarge(MemFs);
+        impl FileSystem for TooLarge {
+            type Error = &'static str;
+            async fn read(&mut self, _: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+                Err("too large")
+            }
+            async fn write(&mut self, n: &str, d: &[u8]) -> Result<(), Self::Error> {
+                self.0.write(n, d).await.unwrap();
+                Ok(())
+            }
+            async fn remove(&mut self, n: &str) -> Result<(), Self::Error> {
+                self.0.remove(n).await.unwrap();
+                Ok(())
+            }
+            fn error_reason(_: &Self::Error) -> Option<&'static str> {
+                Some("the file is too large")
+            }
+        }
+        let fs = TooLarge::default();
+        let mut t = FileTransport::with_config(fs.clone(), fast());
+        let req = request();
+        assert!(block_on(t.poll(&req)).is_none());
+        assert!(fs.0.file("SETUPERR.TXT").unwrap().contains("too large"));
+        fs.0.files.borrow_mut().remove("SETUPERR.TXT");
+        assert!(block_on(t.poll(&req)).is_none());
+        assert_eq!(fs.0.file("SETUPERR.TXT"), None, "reported once");
     }
 
     #[test]

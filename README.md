@@ -266,21 +266,26 @@ exact command. Things most likely to break first:
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+`.github/workflows/ci.yml` runs on pushes to `main`/`master` and on pull requests:
 
 - **host:** formatting, clippy and the host tests above;
 - **lib:** clippy for the library on all 11 chips, with both `log` and `defmt`;
 - **examples:** builds the examples for every chip with its supported features.
 
 `.github/workflows/pages.yml` publishes `web/` to GitHub Pages on pushes to
-`main`. Enable Pages with "GitHub Actions" as the source in the repository
+`main` or `master`. Enable Pages with "GitHub Actions" as the source in the repository
 settings.
 
 ## Known limitations
 
-- BLE protocol v1 sends values **unencrypted**; provision in a trusted
-  environment. The planned ESP-IDF provisioning path adds encryption
-  (security1/security2).
+- BLE protocol v1 has no pairing or encryption: anyone in range can read the
+  values and also write their own. Provision in a trusted environment. The
+  planned ESP-IDF provisioning path adds encryption (security1/security2).
+- `store::nvs_store()` erases existing ESP-IDF NVS data in the `nvs`
+  partition (the formats are incompatible); use `partition_store()` with a
+  dedicated partition if that matters.
+- Secret handling (RAM wiping, SD card wiping) is best effort; see the crate
+  README.
 - Classic esp32: BLE fails to link with esp-radio 1.0.0-beta.1 (unresolved
   symbols in the controller library). The esp32 examples are built without BLE.
 - esp32s31: esp-radio does not support BLE yet; the BOOT button pin in the

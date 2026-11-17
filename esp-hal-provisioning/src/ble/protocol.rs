@@ -185,6 +185,9 @@ pub fn values_from(
     pairs: &[(String, String)],
     current: Option<&Values>,
 ) -> Result<Values, String> {
+    if pairs.len() > schema.fields.len() {
+        return Err(String::from("more values than the schema has fields"));
+    }
     let mut values = Values::new();
     for field in schema.fields.iter().filter(|f| f.is_secret()) {
         if !pairs.iter().any(|(k, _)| k == field.key)

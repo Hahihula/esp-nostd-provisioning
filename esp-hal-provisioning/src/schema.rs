@@ -11,6 +11,9 @@ use core::fmt;
 /// Maximum length (in bytes) of a single stored value.
 pub const MAX_VALUE_LEN: u16 = 256;
 
+/// Maximum length (in bytes) of a storage key, `"{namespace}/{field key}"`.
+pub const MAX_KEY_LEN: usize = 64;
+
 /// Custom validation hook for a field. Return a short human readable reason
 /// on failure; it is shown to the user by the transport.
 pub type Validator = fn(&str) -> Result<(), &'static str>;
@@ -30,11 +33,33 @@ pub struct Schema {
 
 impl Schema {
     /// Create a new schema.
+    ///
+    /// # Panics
+    ///
+    /// If a storage key (`"{namespace}/{field key}"`) is longer than
+    /// [`MAX_KEY_LEN`] or two fields share a key. For a `static` schema this
+    /// is a compile-time error.
     pub const fn new(
         namespace: &'static str,
         title: &'static str,
         fields: &'static [Field],
     ) -> Self {
+        let mut i = 0;
+        while i < fields.len() {
+            assert!(
+                namespace.len() + 1 + fields[i].key.len() <= MAX_KEY_LEN,
+                "a storage key (namespace/field key) is longer than MAX_KEY_LEN"
+            );
+            let mut j = i + 1;
+            while j < fields.len() {
+                assert!(
+                    !str_eq(fields[i].key, fields[j].key),
+                    "duplicate field key in schema"
+                );
+                j += 1;
+            }
+            i += 1;
+        }
         Self {
             namespace,
             title,
@@ -46,6 +71,21 @@ impl Schema {
     pub fn field(&self, key: &str) -> Option<&'static Field> {
         self.fields.iter().find(|f| f.key == key)
     }
+}
+
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// The type of a field, which drives validation and how transports render it.
@@ -188,15 +228,21 @@ impl Field {
         self
     }
 
-    /// Set the length limits of a text, secret or choice field.
+    /// Set the length limits (in bytes) of a text, secret or choice field.
+    /// `max` is capped at [`MAX_VALUE_LEN`].
     ///
     /// Has no effect on integer and boolean fields.
+    ///
+    /// # Panics
+    ///
+    /// If `min` is greater than the (capped) `max`.
     pub const fn with_len(mut self, min: u16, max: u16) -> Self {
         let max = if max > MAX_VALUE_LEN {
             MAX_VALUE_LEN
         } else {
             max
         };
+        assert!(min <= max, "with_len: min is greater than max");
         self.kind = match self.kind {
             FieldKind::Text { .. } => FieldKind::Text {
                 min_len: min,
@@ -417,6 +463,30 @@ mod tests {
             Err(ValidationError::Custom("must not contain spaces"))
         );
         assert_eq!(f.validate("ab"), Ok(()));
+    }
+
+    #[test]
+    #[should_panic(expected = "min is greater than max")]
+    fn with_len_rejects_min_above_capped_max() {
+        let _ = Field::text("t", "T", "").with_len(300, 400);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate field key")]
+    fn schema_rejects_duplicate_keys() {
+        static FIELDS: [Field; 2] = [Field::text("a", "A", ""), Field::text("a", "B", "")];
+        let _ = Schema::new("ns", "T", &FIELDS);
+    }
+
+    #[test]
+    #[should_panic(expected = "longer than MAX_KEY_LEN")]
+    fn schema_rejects_long_keys() {
+        static FIELDS: [Field; 1] = [Field::text(
+            "a_very_long_field_key_that_does_not_fit_into_the_storage_key_limit",
+            "A",
+            "",
+        )];
+        let _ = Schema::new("ns", "T", &FIELDS);
     }
 
     #[test]

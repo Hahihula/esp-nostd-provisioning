@@ -2,8 +2,8 @@ use alloc::{format, string::String, vec::Vec};
 use core::fmt::Debug;
 
 use crate::{
-    Choice, Request, Schema, Store, Transport, Values, Verify,
-    store::{load, save},
+    Choice, FieldKind, Request, Schema, Store, Transport, Values, Verify,
+    store::{load_partial, save},
 };
 
 /// Options for [`provision`].
@@ -48,8 +48,17 @@ impl<S: Debug, T: Debug> core::error::Error for Error<S, T> {}
 ///    are complete and valid.
 /// 2. Otherwise values are collected over `transport`, validated against the
 ///    schema and checked by `verifier`. On failure the user is asked again,
-///    together with the reason.
+///    together with the reason, with the rejected values offered as defaults.
 /// 3. Accepted values are saved and returned.
+///
+/// # Cancellation
+///
+/// Do not drop this future (e.g. with `with_timeout` or `select`) while
+/// values are being saved: cancelling a flash write half way leaves the
+/// store's in-RAM state out of sync with the flash. Bound the provisioning
+/// session with [`Options::max_attempts`] instead, or re-create the store
+/// after cancelling. Within a tuple transport `(A, B)` the losing
+/// transport is dropped *before* saving starts, so it cannot interrupt it.
 pub async fn provision<S, T, V>(
     schema: &Schema,
     store: &mut S,
@@ -62,16 +71,17 @@ where
     T: Transport,
     V: Verify,
 {
-    let current = load(store, schema).await.map_err(Error::Store)?;
-    if !options.force
-        && let Some(values) = current
-    {
+    let (stored, complete) = load_partial(store, schema).await.map_err(Error::Store)?;
+    if !options.force && complete {
         debug!("'{}' already provisioned", schema.namespace);
-        return Ok(values);
+        return Ok(stored);
     }
 
     info!("provisioning '{}'", schema.namespace);
+    let mut choices = options.choices.to_vec();
     let mut last_error: Option<String> = None;
+    // Values rejected by the verifier: offered as defaults on the next attempt.
+    let mut rejected: Option<Values> = None;
     let mut attempt = 0;
 
     loop {
@@ -80,10 +90,13 @@ where
             return Err(Error::TooManyAttempts);
         }
 
+        let current = rejected
+            .as_ref()
+            .or((!stored.is_empty()).then_some(&stored));
         let request = Request {
             schema,
-            choices: options.choices,
-            current: current.as_ref(),
+            choices: &choices,
+            current,
             attempt,
             last_error: last_error.as_deref(),
         };
@@ -92,15 +105,25 @@ where
             .await
             .map_err(Error::Transport)?;
 
-        if let Err(e) = validate_all(schema, &values) {
+        if let Err(e) = validate_all(schema, &values, &choices) {
             warn!("provisioned values rejected");
             last_error = Some(e);
             continue;
         }
 
-        if let Err(e) = transport.while_verifying(verifier.verify(&values)).await {
+        let verdict = transport
+            .while_verifying(async {
+                let verdict = verifier.verify(&values).await;
+                if verdict.is_err() {
+                    verifier.refresh_choices(&mut choices).await;
+                }
+                verdict
+            })
+            .await;
+        if let Err(e) = verdict {
             warn!("verification failed");
             last_error = Some(e.0);
+            rejected = Some(values);
             continue;
         }
 
@@ -112,16 +135,33 @@ where
 }
 
 /// Validate values coming from a (possibly remote) transport against the schema.
-fn validate_all(schema: &Schema, values: &Values) -> Result<(), String> {
+fn validate_all(
+    schema: &Schema,
+    values: &Values,
+    choices: &[(&'static str, Vec<Choice>)],
+) -> Result<(), String> {
     for (key, _) in values.iter() {
         if schema.field(key).is_none() {
             return Err(format!("unknown field '{key}'"));
         }
     }
     for field in schema.fields {
+        let value = values.get(field.key).unwrap_or("");
         field
-            .validate(values.get(field.key).unwrap_or(""))
+            .validate(value)
             .map_err(|e| format!("{}: {e}", field.name))?;
+        // Fixed choices are enforced here, whichever transport delivered them.
+        if let FieldKind::Choice {
+            allow_custom: false,
+            ..
+        } = field.kind
+            && !value.is_empty()
+            && let Some((_, options)) = choices.iter().find(|(k, _)| *k == field.key)
+            && !options.is_empty()
+            && !options.iter().any(|c| c.value == value)
+        {
+            return Err(format!("{}: not one of the offered options", field.name));
+        }
     }
     Ok(())
 }
@@ -129,7 +169,10 @@ fn validate_all(schema: &Schema, values: &Values) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Field, NoVerify, VerifyError, store::MemoryStore};
+    use crate::{
+        Field, NoVerify, VerifyError,
+        store::{MemoryStore, load},
+    };
     use alloc::{collections::VecDeque, string::ToString};
     use futures::executor::block_on;
 
@@ -333,7 +376,7 @@ mod tests {
         v.set("name", "dev");
         v.set("n", "1");
         v.set("evil", "x");
-        assert!(validate_all(&SCHEMA, &v).is_err());
+        assert!(validate_all(&SCHEMA, &v, &[]).is_err());
     }
 
     #[test]
@@ -348,5 +391,133 @@ mod tests {
             let r = provision(&SCHEMA, &mut store, &mut t, &mut NoVerify, &opts).await;
             assert!(matches!(r, Err(Error::TooManyAttempts)));
         });
+    }
+
+    /// Transport that fails right away.
+    struct Broken;
+    impl Transport for Broken {
+        type Error = &'static str;
+        async fn collect(&mut self, _: &Request<'_>) -> Result<Values, Self::Error> {
+            Err("uart unplugged")
+        }
+    }
+
+    #[test]
+    fn failing_transport_does_not_end_the_session() {
+        block_on(async {
+            let mut store = MemoryStore::new();
+            let mut t = (Broken, Scripted::new(&[&[("name", "dev"), ("n", "3")]]));
+            let v = provision(
+                &SCHEMA,
+                &mut store,
+                &mut t,
+                &mut NoVerify,
+                &Options::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(v.get("name"), Some("dev"));
+        });
+    }
+
+    #[test]
+    fn both_transports_failing_is_an_error() {
+        block_on(async {
+            let mut store = MemoryStore::new();
+            let r = provision(
+                &SCHEMA,
+                &mut store,
+                &mut (Broken, Broken),
+                &mut NoVerify,
+                &Options::default(),
+            )
+            .await;
+            assert!(matches!(r, Err(Error::Transport(_))));
+        });
+    }
+
+    /// Transport recording the defaults (`current`) it was offered.
+    struct SeesCurrent {
+        inner: Scripted,
+        seen: Vec<Option<String>>,
+    }
+    impl Transport for SeesCurrent {
+        type Error = &'static str;
+        async fn collect(&mut self, req: &Request<'_>) -> Result<Values, Self::Error> {
+            self.seen
+                .push(req.current.and_then(|c| c.get("name")).map(String::from));
+            self.inner.collect(req).await
+        }
+    }
+
+    /// Verifier rejecting the first attempt and counting choice refreshes.
+    struct RefreshOnReject {
+        reject: bool,
+        refreshed: u32,
+    }
+    impl Verify for RefreshOnReject {
+        async fn verify(&mut self, _: &Values) -> Result<(), VerifyError> {
+            if core::mem::replace(&mut self.reject, false) {
+                Err(VerifyError("wrong password".into()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn refresh_choices(&mut self, choices: &mut crate::transport::Choices) {
+            self.refreshed += 1;
+            choices.push((
+                "net",
+                alloc::vec![Choice {
+                    value: "new".into(),
+                    label: "new".into()
+                }],
+            ));
+        }
+    }
+
+    #[test]
+    fn rejected_values_become_defaults_and_choices_refresh() {
+        block_on(async {
+            let mut store = MemoryStore::new();
+            let mut t = SeesCurrent {
+                inner: Scripted::new(&[
+                    &[("name", "first"), ("n", "1")],
+                    &[("name", "b"), ("n", "1")],
+                ]),
+                seen: Vec::new(),
+            };
+            let mut verifier = RefreshOnReject {
+                reject: true,
+                refreshed: 0,
+            };
+            provision(
+                &SCHEMA,
+                &mut store,
+                &mut t,
+                &mut verifier,
+                &Options::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(t.seen, [None, Some("first".to_string())]);
+            assert_eq!(verifier.refreshed, 1);
+        });
+    }
+
+    #[test]
+    fn fixed_choices_are_enforced() {
+        static FIXED: Schema = Schema::new("f", "F", &[Field::choice("mode", "Mode", "", false)]);
+        let choices = [(
+            "mode",
+            alloc::vec![Choice {
+                value: "a".into(),
+                label: "A".into()
+            }],
+        )];
+        let mut v = Values::new();
+        v.set("mode", "b");
+        assert!(validate_all(&FIXED, &v, &choices).is_err());
+        v.set("mode", "a");
+        assert!(validate_all(&FIXED, &v, &choices).is_ok());
     }
 }

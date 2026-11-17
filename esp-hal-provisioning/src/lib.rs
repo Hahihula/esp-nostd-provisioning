@@ -52,6 +52,9 @@
 //! | `defmt`       |         | Logging through `defmt`                                   |
 //! | `esp32…`      |         | Target chip, required together with `wifi`                |
 #![no_std]
+// The traits use `async fn` without `Send` bounds on purpose: Embassy
+// executors on these chips are single threaded, so futures never cross
+// threads and implementors should not be forced to be `Send`.
 #![allow(async_fn_in_trait)]
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

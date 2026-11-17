@@ -4,12 +4,12 @@
 //! of that, re-provisioning can be triggered by:
 //!
 //! - **API:** set [`Options::force`](crate::Options::force) (or
-//!   [`WifiConfig::force`](crate::wifi::WifiConfig::force)), or erase values
+//!   `wifi::WifiConfig::force`), or erase values
 //!   with [`store::clear`](crate::store::clear).
 //! - **Button:** [`button_held`] at boot.
-//! - **Connection failures:** [`wifi::provision`](crate::wifi::provision)
+//! - **Connection failures:** `wifi::provision`
 //!   falls back to provisioning after
-//!   [`WifiConfig::connect_attempts`](crate::wifi::WifiConfig::connect_attempts)
+//!   `wifi::WifiConfig::connect_attempts`
 //!   failed connection attempts with the stored credentials.
 
 use embassy_time::{Duration, Instant, Timer};

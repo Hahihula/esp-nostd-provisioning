@@ -65,7 +65,8 @@ pub struct BleConfig {
     /// Default: `"ESP-Provision"`.
     pub name: &'static str,
     /// Random static address (little endian). Default: derived from the
-    /// chip's Bluetooth MAC with `esp-ble`, a fixed address otherwise.
+    /// chip's Bluetooth MAC with `esp-ble`. With another controller the
+    /// default is a fixed address shared by all devices, so set a unique one.
     pub address: Option<[u8; 6]>,
 }
 
@@ -182,17 +183,6 @@ fn default_address() -> [u8; 6] {
     [0x01, 0x50, 0x52, 0x4f, 0x56, 0xc0]
 }
 
-/// Parse a UUID string into little-endian bytes (as used in advertising data).
-fn uuid_le(uuid: &str) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    let hex: Vec<u8> = uuid.bytes().filter(|b| *b != b'-').collect();
-    for (i, pair) in hex.chunks(2).enumerate().take(16) {
-        let text = core::str::from_utf8(pair).unwrap_or("00");
-        out[15 - i] = u8::from_str_radix(text, 16).unwrap_or(0);
-    }
-    out
-}
-
 /// The BLE provisioning transport. Created by [`run`].
 pub struct BleTransport<'p, 's, 'v, C: Controller> {
     stack: &'p Stack<'s, C, Pool>,
@@ -213,7 +203,8 @@ impl<'p, 's, 'v, C: Controller> BleTransport<'p, 's, 'v, C> {
 
     /// Advertise until a client connects.
     async fn connect(&mut self) {
-        let service = [uuid_le(protocol::SERVICE_UUID)];
+        // Little endian, as used in advertising data.
+        let service = [SERVICE.to_le_bytes()];
         let name = &self.name.as_bytes()[..self.name.len().min(29)];
         let mut adv_data = [0u8; 31];
         let mut scan_data = [0u8; 31];
@@ -385,19 +376,17 @@ impl<C: Controller> Transport for BleTransport<'_, '_, '_, C> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn uuid_bytes_are_little_endian() {
-        let b = uuid_le(protocol::SERVICE_UUID);
-        assert_eq!(b[15], 0x4b);
-        assert_eq!(b[14], 0x8f);
-        assert_eq!(b[0], 0x9e);
+    fn parse_uuid(uuid: &str) -> u128 {
+        assert_eq!(uuid.len(), 36, "{uuid}");
+        u128::from_str_radix(&uuid.replace('-', ""), 16).unwrap()
     }
 
     #[test]
     fn uuid_constants_match_protocol_strings() {
-        assert_eq!(uuid_le(protocol::SERVICE_UUID), SERVICE.to_le_bytes());
-        assert_eq!(uuid_le(protocol::RX_UUID), RX.to_le_bytes());
-        assert_eq!(uuid_le(protocol::TX_UUID), TX.to_le_bytes());
+        assert_eq!(parse_uuid(protocol::SERVICE_UUID), SERVICE);
+        assert_eq!(parse_uuid(protocol::RX_UUID), RX);
+        assert_eq!(parse_uuid(protocol::TX_UUID), TX);
+        assert_eq!(SERVICE.to_le_bytes()[15], 0x4b);
     }
 
     #[test]

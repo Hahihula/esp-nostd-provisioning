@@ -2,7 +2,7 @@ name: Deploy provisioning web page
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     paths: ["web/**"]
   workflow_dispatch:
 

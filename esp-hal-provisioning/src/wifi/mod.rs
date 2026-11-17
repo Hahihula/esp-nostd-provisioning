@@ -1,13 +1,13 @@
 //! Built-in Wi-Fi provisioning.
 //!
 //! [`SCHEMA`] describes Wi-Fi credentials (SSID + password). With the `wifi`
-//! feature, [`provision`] implements the complete flow on top of
+//! feature, `provision` implements the complete flow on top of
 //! `esp-radio`:
 //!
 //! 1. Try to connect with stored credentials.
 //! 2. If there are none, or connecting fails
-//!    [`WifiConfig::connect_attempts`] times, scan and offer the strongest
-//!    [`WifiConfig::max_networks`] networks through the transport.
+//!    `WifiConfig::connect_attempts` times, scan and offer the strongest
+//!    `WifiConfig::max_networks` networks through the transport.
 //! 3. Verify the entered credentials by connecting, and only then save them.
 //!
 //! When `provision` returns, the controller is connected.
@@ -86,6 +86,40 @@ impl core::fmt::Debug for WifiCredentials {
     }
 }
 
+/// Security of a scanned network, independent of the radio driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Security {
+    /// No password.
+    Open,
+    /// WEP (legacy).
+    Wep,
+    /// WPA and/or WPA2 Personal.
+    Wpa2,
+    /// WPA3 Personal, possibly in WPA2/WPA3 transition mode.
+    Wpa3,
+    /// Not supported by this crate (enterprise, OWE, WAPI, DPP, …).
+    Unsupported,
+}
+
+impl Security {
+    /// Whether a password is needed.
+    pub fn needs_password(self) -> bool {
+        !matches!(self, Security::Open)
+    }
+
+    /// Short label shown to the user.
+    pub fn label(self) -> &'static str {
+        match self {
+            Security::Open => "open",
+            Security::Wep => "WEP",
+            Security::Wpa2 => "WPA2",
+            Security::Wpa3 => "WPA3",
+            Security::Unsupported => "unsupported",
+        }
+    }
+}
+
 /// A scanned network, independent of the radio driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
@@ -93,16 +127,17 @@ pub struct Network {
     pub ssid: String,
     /// Signal strength in dBm.
     pub rssi: i8,
-    /// Whether the network requires a password.
-    pub secured: bool,
+    /// Security of the network.
+    pub security: Security,
 }
 
-/// Deduplicate networks by SSID (keeping the strongest), drop hidden ones,
-/// sort by signal strength and keep at most `max`.
+/// Deduplicate networks by SSID (keeping the strongest), drop hidden and
+/// unsupported ones (enterprise, OWE, …, which a password cannot unlock), sort
+/// by signal strength and keep at most `max`.
 pub fn best_networks(networks: impl IntoIterator<Item = Network>, max: usize) -> Vec<Network> {
     let mut best: Vec<Network> = Vec::new();
     for network in networks {
-        if network.ssid.is_empty() {
+        if network.ssid.is_empty() || network.security == Security::Unsupported {
             continue;
         }
         match best.iter_mut().find(|n| n.ssid == network.ssid) {
@@ -127,7 +162,7 @@ pub fn network_choices(networks: &[Network]) -> Vec<Choice> {
                 n.ssid,
                 n.rssi,
                 signal_bars(n.rssi),
-                if n.secured { "secured" } else { "open" }
+                n.security.label()
             ),
         })
         .collect()
@@ -151,7 +186,7 @@ mod tests {
         Network {
             ssid: ssid.to_string(),
             rssi,
-            secured: true,
+            security: Security::Wpa2,
         }
     }
 
@@ -168,6 +203,17 @@ mod tests {
         let best = best_networks(nets, 3);
         let names: Vec<_> = best.iter().map(|n| (n.ssid.as_str(), n.rssi)).collect();
         assert_eq!(names, [("b", -40), ("a", -50), ("c", -60)]);
+    }
+
+    #[test]
+    fn unsupported_networks_are_dropped_and_security_is_labelled() {
+        let mut corp = net("corp", -30);
+        corp.security = Security::Unsupported;
+        let mut new = net("new", -50);
+        new.security = Security::Wpa3;
+        let best = best_networks([corp, new], 10);
+        assert_eq!(best.len(), 1);
+        assert!(network_choices(&best)[0].label.ends_with("WPA3"));
     }
 
     #[test]

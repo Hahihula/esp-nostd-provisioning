@@ -46,6 +46,8 @@ pub(crate) struct LineReader {
     pending_end: usize,
     last_was_cr: bool,
     esc: EscState,
+    /// Skipping the rest of a character that did not fit into the line.
+    skip_continuation: bool,
 }
 
 impl LineReader {
@@ -58,8 +60,13 @@ impl LineReader {
         echo: Echo,
     ) -> Result<Line, IO::Error> {
         buf.clear();
+        self.skip_continuation = false;
+        // Echo is collected per received chunk and written at once.
+        let mut echoed: Vec<u8> = Vec::new();
         loop {
             if self.pending_start == self.pending_end {
+                io.write_all(&echoed).await?;
+                echoed.clear();
                 io.flush().await?;
                 self.pending_end = io.read(&mut self.pending).await?;
                 self.pending_start = 0;
@@ -92,35 +99,42 @@ impl LineReader {
                     b'\n' if was_cr => {}
                     b'\r' | b'\n' => {
                         self.last_was_cr = byte == b'\r';
-                        io.write_all(b"\r\n").await?;
+                        echoed.extend_from_slice(b"\r\n");
+                        io.write_all(&echoed).await?;
                         io.flush().await?;
                         return Ok(Line::Done);
                     }
                     CTRL_C => {
-                        io.write_all(b"^C\r\n").await?;
+                        echoed.extend_from_slice(b"^C\r\n");
+                        io.write_all(&echoed).await?;
                         io.flush().await?;
                         buf.clear();
                         return Ok(Line::Cancelled);
                     }
                     BACKSPACE | DEL => {
                         if pop_char(buf) && echo != Echo::Hidden {
-                            io.write_all(b"\x08 \x08").await?;
+                            echoed.extend_from_slice(b"\x08 \x08");
                         }
                     }
                     ESC => self.esc = EscState::Esc,
                     b if b < 0x20 => {}
                     b => {
-                        if buf.len() >= max {
+                        let starts_char = b & 0xc0 != 0x80;
+                        if starts_char {
+                            // Accept a character only if all of its bytes fit,
+                            // so the line is never cut inside a character.
+                            self.skip_continuation = buf.len() + utf8_width(b) > max;
+                        }
+                        if self.skip_continuation || buf.len() >= max {
                             continue;
                         }
                         buf.push(b);
                         // Only echo once per character (skip UTF-8 continuation bytes).
-                        let starts_char = b & 0xc0 != 0x80;
                         match echo {
-                            Echo::Plain => io.write_all(&[b]).await?,
+                            Echo::Plain => echoed.push(b),
                             Echo::Mask(c) if starts_char => {
                                 let mut tmp = [0u8; 4];
-                                io.write_all(c.encode_utf8(&mut tmp).as_bytes()).await?;
+                                echoed.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
                             }
                             _ => {}
                         }
@@ -128,6 +142,16 @@ impl LineReader {
                 }
             }
         }
+    }
+}
+
+/// Length of the UTF-8 sequence starting with `lead` (1 for invalid lead bytes).
+fn utf8_width(lead: u8) -> usize {
+    match lead {
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
     }
 }
 
@@ -201,6 +225,20 @@ mod tests {
     fn hidden_echo_prints_nothing_but_newline() {
         let (_, out) = read(b"secret\r", Echo::Hidden);
         assert_eq!(out, "\r\n");
+    }
+
+    #[test]
+    fn length_limit_never_splits_a_character() {
+        block_on(async {
+            // "aé" is 3 bytes; with a limit of 2 the "é" must be dropped whole.
+            let mut io = MockIo::new("aé\r".as_bytes());
+            let mut buf = Vec::new();
+            LineReader::default()
+                .read_line(&mut io, &mut buf, 2, Echo::Plain)
+                .await
+                .unwrap();
+            assert_eq!(buf, b"a");
+        });
     }
 
     #[test]

@@ -12,8 +12,16 @@
 //! Only the first partition (or an unpartitioned card) is used, and file
 //! names must be 8.3 (e.g. `SETUP.TXT`; lower case on the PC is fine).
 //!
-//! `embedded-sdmmc` is a blocking library, so file accesses briefly block
-//! the executor (a few milliseconds per poll for a small file).
+//! `embedded-sdmmc` is a blocking library, so every file access blocks the
+//! executor while it runs: opening the volume and reading a small file takes
+//! a handful of block reads, i.e. tens of milliseconds at the 400 kHz SPI
+//! clock needed for card initialisation. Raise the clock once the card is
+//! initialised (see [`SdFileSystem::on_success`]).
+//!
+//! Wiping files (before they are rewritten or deleted) overwrites their data
+//! clusters in place. This is **best effort**: the card's controller may
+//! remap blocks internally, so old contents can survive in blocks the
+//! file system no longer sees.
 
 use alloc::{vec, vec::Vec};
 use core::{cell::RefCell, fmt};
@@ -65,6 +73,7 @@ impl TimeSource for FixedTime {
 pub struct SdFileSystem<D: BlockDevice, T: TimeSource = FixedTime> {
     parts: Option<(D, T)>,
     on_error: Option<fn(&D)>,
+    on_success: Option<fn(&D)>,
 }
 
 type Dir<'a, D, T> = embedded_sdmmc::Directory<'a, D, T, 4, 4, 1>;
@@ -82,6 +91,7 @@ impl<D: BlockDevice, T: TimeSource> SdFileSystem<D, T> {
         Self {
             parts: Some((device, time_source)),
             on_error: None,
+            on_success: None,
         }
     }
 
@@ -93,6 +103,21 @@ impl<D: BlockDevice, T: TimeSource> SdFileSystem<D, T> {
     /// ```
     pub fn on_error(mut self, hook: fn(&D)) -> Self {
         self.on_error = Some(hook);
+        self
+    }
+
+    /// Called with the device after a successful access, e.g. to raise the
+    /// SPI clock once the card is initialised (and lower it again in
+    /// [`on_error`](Self::on_error), since re-initialisation needs ≤ 400 kHz):
+    ///
+    /// ```rust,ignore
+    /// fn fast(card: &Card) {
+    ///     card.spi(|dev| dev.bus_mut().apply_config(&spi_config(25_000)).ok());
+    /// }
+    /// let fs = SdFileSystem::new(card).on_error(slow_and_uninit).on_success(fast);
+    /// ```
+    pub fn on_success(mut self, hook: fn(&D)) -> Self {
+        self.on_success = Some(hook);
         self
     }
 
@@ -120,9 +145,11 @@ impl<D: BlockDevice, T: TimeSource> SdFileSystem<D, T> {
             f(&root)
         })();
         let (device, time) = manager.free();
-        if result.is_err()
-            && let Some(hook) = self.on_error
-        {
+        if let Some(hook) = if result.is_ok() {
+            self.on_success
+        } else {
+            self.on_error
+        } {
             hook(&device);
         }
         self.parts = Some((device, time));
@@ -200,6 +227,13 @@ impl<D: BlockDevice, T: TimeSource> FileSystem for SdFileSystem<D, T> {
             Ok(())
         })
     }
+
+    fn error_reason(error: &Self::Error) -> Option<&'static str> {
+        match error {
+            SdError::TooLarge => Some("the file is larger than 16 KiB"),
+            SdError::Fs(_) => None,
+        }
+    }
 }
 
 /// Error of a device wrapped in [`BlockOn`].
@@ -219,7 +253,10 @@ impl<E: fmt::Debug> core::error::Error for BlockOnError<E> {}
 /// [`embedded_sdmmc::BlockDevice`].
 ///
 /// Every block access is driven to completion with
-/// [`embassy_futures::block_on`].
+/// [`embassy_futures::block_on`], which busy-polls the future on the current
+/// task. That works for drivers woken from interrupts (like `esp-hal`'s
+/// SDMMC host), but would dead-lock with a driver that needs another task of
+/// the same executor to make progress.
 pub struct BlockOn<D>(RefCell<D>);
 
 impl<D> BlockOn<D> {

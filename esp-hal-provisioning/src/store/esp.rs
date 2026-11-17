@@ -21,13 +21,21 @@ pub enum EspFlashStoreError {
     PartitionNotFound,
     /// The partition is not usable (misaligned or too small, needs ≥ 2 sectors).
     InvalidPartition(MapConfigError),
+    /// The partition table entry is invalid (it extends past the address space).
+    PartitionOutOfRange,
 }
 
 /// Create a store on the `nvs` data partition of the internal flash.
 ///
 /// The default ESP-IDF partition tables (and the ones used by `espflash`)
-/// contain a 24 KiB `nvs` partition. The data format is **not** compatible
-/// with ESP-IDF NVS; existing NVS content is ignored and overwritten.
+/// contain a 24 KiB `nvs` partition, so this works without a custom
+/// partition table.
+///
+/// ⚠️ The data format is **not** compatible with ESP-IDF NVS: existing NVS
+/// content (from an ESP-IDF or Arduino firmware, or calibration data kept
+/// there) is **erased** on first use. If the device also runs ESP-IDF code or
+/// keeps data in NVS, add a dedicated partition to the partition table and use
+/// [`partition_store`] instead.
 pub fn nvs_store(flash: FLASH<'_>) -> Result<EspFlashStore<'_>, EspFlashStoreError> {
     open(flash, |p| {
         p.partition_type() == PartitionType::Data(DataPartitionSubType::Nvs)
@@ -55,7 +63,11 @@ fn open(
             .iter()
             .find(|p| matches(p))
             .ok_or(EspFlashStoreError::PartitionNotFound)?;
-        partition.offset()..partition.offset() + partition.len()
+        let end = partition
+            .offset()
+            .checked_add(partition.len())
+            .ok_or(EspFlashStoreError::PartitionOutOfRange)?;
+        partition.offset()..end
     };
     FlashStore::new(BlockingAsync::new(storage), range)
         .map_err(EspFlashStoreError::InvalidPartition)

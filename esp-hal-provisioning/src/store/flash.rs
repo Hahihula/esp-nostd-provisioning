@@ -1,4 +1,4 @@
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String};
 use core::ops::Range;
 
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
@@ -8,10 +8,17 @@ use sequential_storage::{
 };
 
 use super::Store;
-use crate::schema::MAX_VALUE_LEN;
+use crate::schema::{MAX_KEY_LEN, MAX_VALUE_LEN};
 
-/// Maximum length of a full storage key (`"{namespace}/{field}"`).
-const MAX_KEY_LEN: usize = 64;
+/// Scratch space for one item: the key (plus its 2 byte length prefix), the
+/// value and sequential-storage's item header (checked in [`FlashStore::new`]),
+/// with headroom for word padding.
+const BUFFER_LEN: usize = (MAX_KEY_LEN + 2 + MAX_VALUE_LEN as usize + 64).next_multiple_of(32);
+
+/// The scratch buffer is word aligned: `esp-storage` falls back to a 4 KiB
+/// stack buffer for every access through an unaligned slice.
+#[repr(C, align(4))]
+struct Buffer([u8; BUFFER_LEN]);
 
 type Uncached = Cache<
     sequential_storage::cache::Uncached,
@@ -31,7 +38,7 @@ type Uncached = Cache<
 /// format is **not** compatible with ESP-IDF NVS.
 pub struct FlashStore<F: MultiwriteNorFlash> {
     map: MapStorage<String, F, Uncached>,
-    buffer: Vec<u8>,
+    buffer: Box<Buffer>,
 }
 
 impl<F: MultiwriteNorFlash> FlashStore<F> {
@@ -41,12 +48,15 @@ impl<F: MultiwriteNorFlash> FlashStore<F> {
     /// erase pages.
     pub fn new(flash: F, range: Range<u32>) -> Result<Self, MapConfigError> {
         let config = MapConfig::try_new(range)?;
-        // Key + value + headers, rounded up generously to the word size.
-        let len =
-            (MAX_KEY_LEN + MAX_VALUE_LEN as usize + 2 + 16).next_multiple_of(F::WRITE_SIZE.max(4));
+        let overhead = MapStorage::<String, F, Uncached>::item_overhead_size() as usize;
+        assert!(
+            overhead + (MAX_KEY_LEN + 2 + MAX_VALUE_LEN as usize).next_multiple_of(F::WRITE_SIZE)
+                <= BUFFER_LEN,
+            "FlashStore scratch buffer too small for this flash"
+        );
         Ok(Self {
             map: MapStorage::new(flash, config, Cache::new_uncached()),
-            buffer: vec![0; len],
+            buffer: Box::new(Buffer([0; BUFFER_LEN])),
         })
     }
 
@@ -66,30 +76,47 @@ impl<F: MultiwriteNorFlash> Store for FlashStore<F> {
 
     async fn read(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
         let key = String::from(key);
-        let value = self.map.fetch_item::<&[u8]>(&mut self.buffer, &key).await?;
-        Ok(value.and_then(|bytes| core::str::from_utf8(bytes).ok().map(String::from)))
+        let result = self
+            .map
+            .fetch_item::<&[u8]>(&mut self.buffer.0, &key)
+            .await
+            .map(|value| {
+                value.and_then(|bytes| match core::str::from_utf8(bytes) {
+                    Ok(text) => Some(String::from(text)),
+                    Err(_) => {
+                        warn!(
+                            "stored value for '{}' is not valid UTF-8, ignoring it",
+                            key.as_str()
+                        );
+                        None
+                    }
+                })
+            });
+        // Don't leave secrets in the scratch buffer.
+        self.buffer.0.fill(0);
+        result
     }
 
     async fn write(&mut self, key: &str, value: &str) -> Result<(), Self::Error> {
         let key = String::from(key);
         let result = self
             .map
-            .store_item(&mut self.buffer, &key, &value.as_bytes())
+            .store_item(&mut self.buffer.0, &key, &value.as_bytes())
             .await;
-        // Don't leave secrets in the scratch buffer.
-        self.buffer.fill(0);
+        self.buffer.0.fill(0);
         result
     }
 
     async fn remove(&mut self, key: &str) -> Result<(), Self::Error> {
         let key = String::from(key);
-        self.map.remove_item(&mut self.buffer, &key).await
+        self.map.remove_item(&mut self.buffer.0, &key).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::{vec, vec::Vec};
     use core::convert::Infallible;
     use embedded_storage_async::nor_flash::{ErrorType, NorFlash, ReadNorFlash};
     use futures::executor::block_on;
@@ -165,6 +192,24 @@ mod tests {
             }
             assert_eq!(store.read("k").await.unwrap().as_deref(), Some("value-199"));
         });
+    }
+
+    #[test]
+    fn longest_key_and_value_fit() {
+        block_on(async {
+            let flash = RamFlash(vec![0xff; 8 * 1024]);
+            let mut store = FlashStore::new(flash, 0..8 * 1024).unwrap();
+            let key = "k".repeat(MAX_KEY_LEN);
+            let value = "v".repeat(MAX_VALUE_LEN as usize);
+            store.write(&key, &value).await.unwrap();
+            assert_eq!(store.read(&key).await.unwrap(), Some(value));
+        });
+    }
+
+    #[test]
+    fn scratch_buffer_is_word_aligned() {
+        let store = FlashStore::new(RamFlash(vec![0xff; 4096]), 0..4096).unwrap();
+        assert_eq!(store.buffer.0.as_ptr() as usize % 4, 0);
     }
 
     #[test]
