@@ -67,6 +67,7 @@ enum Input {
 /// Error of the [`Cli`] transport.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum CliError<E> {
     /// The serial port failed.
     Io(E),
@@ -83,7 +84,14 @@ impl<E: core::fmt::Display> core::fmt::Display for CliError<E> {
     }
 }
 
-impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error for CliError<E> {}
+impl<E: core::error::Error + 'static> core::error::Error for CliError<E> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Eof => None,
+        }
+    }
+}
 
 impl<IO: Read + Write> Cli<IO> {
     /// Create a CLI transport with the default configuration.
@@ -171,10 +179,14 @@ impl<IO: Read + Write> Cli<IO> {
         }
         if let Some(current) = current {
             if field.is_secret() {
-                header.push_str("  Press Enter to keep the current value\r\n");
+                header.push_str("  Press Enter to keep the current value");
             } else {
-                header.push_str(&format!("  Press Enter to keep '{current}'\r\n"));
+                header.push_str(&format!("  Press Enter to keep '{current}'"));
             }
+            if !field.required {
+                header.push_str(", or type - to clear it");
+            }
+            header.push_str("\r\n");
         }
         self.print(&header).await?;
 
@@ -185,7 +197,7 @@ impl<IO: Read + Write> Cli<IO> {
         };
         loop {
             self.print("> ").await?;
-            let input = match self.read(MAX_VALUE_LEN as usize, echo).await? {
+            let input = match self.read(MAX_VALUE_LEN, echo).await? {
                 Input::Line(input) => input,
                 Input::Cancelled => return Ok(Prompt::Restart),
                 Input::Eof => return Ok(Prompt::Eof),
@@ -196,7 +208,10 @@ impl<IO: Read + Write> Cli<IO> {
                 }
             };
 
-            let value = if input.trim().is_empty() && current.is_some() {
+            let value = if !field.required && current.is_some() && input.trim() == "-" {
+                // Clear an optional value (e.g. switch to an open network).
+                String::new()
+            } else if input.trim().is_empty() && current.is_some() {
                 String::from(current.unwrap_or_default())
             } else if let FieldKind::Choice { allow_custom, .. } = field.kind {
                 match input.trim().parse::<usize>() {
@@ -239,7 +254,10 @@ impl<IO: Read + Write> Cli<IO> {
                 Input::Line(answer) => answer,
                 Input::Cancelled => return Ok(Confirm::No),
                 Input::Eof => return Ok(Confirm::Eof),
-                Input::InvalidUtf8 => String::new(),
+                Input::InvalidUtf8 => {
+                    self.print("  ! invalid characters\r\nSave? [Y/n] ").await?;
+                    continue;
+                }
             };
             match answer.trim() {
                 "" => return Ok(Confirm::Yes),
@@ -383,13 +401,13 @@ pub(crate) mod tests {
         ],
     );
 
-    fn run(input: &str, current: Option<Values>) -> (Values, String) {
+    fn run(input: impl AsRef<[u8]>, current: Option<Values>) -> (Values, String) {
         block_on(async {
             let mut store = MemoryStore::new();
             if let Some(c) = &current {
                 crate::store::save(&mut store, &SCHEMA, c).await.unwrap();
             }
-            let mut cli = Cli::new(MockIo::new(input.as_bytes()));
+            let mut cli = Cli::new(MockIo::new(input.as_ref()));
             let choices = vec![(
                 "net",
                 vec![
@@ -474,6 +492,26 @@ pub(crate) mod tests {
             assert_eq!(v.get("pw"), Some("password1"));
             assert!(cli.into_inner().output().contains("invalid characters"));
         });
+    }
+
+    #[test]
+    fn dash_clears_an_optional_secret() {
+        let mut current = Values::new();
+        current.set("net", "home");
+        current.set("pw", "oldsecret1");
+        current.set("port", "1");
+        current.set("tls", "true");
+        let (v, out) = run("\r-\r\r\r\r", Some(current));
+        assert_eq!(v.get("pw"), None, "password cleared (open network)");
+        assert!(out.contains("or type - to clear it"));
+    }
+
+    #[test]
+    fn invalid_utf8_at_confirmation_does_not_save() {
+        // A garbage byte at "Save?" must ask again, not count as "yes".
+        let (v, out) = run(b"1\r\r80\ry\r\xff\rn\r2\r\r81\ry\r\r", None);
+        assert_eq!(v.get("net"), Some("office"));
+        assert!(out.contains("invalid characters"));
     }
 
     /// Serial port that reports end of stream after the scripted input.

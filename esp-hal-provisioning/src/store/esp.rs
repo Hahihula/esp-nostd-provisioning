@@ -14,6 +14,7 @@ pub type EspFlashStore<'d> = FlashStore<BlockingAsync<FlashStorage<'d>>>;
 /// Error creating an [`EspFlashStore`].
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum EspFlashStoreError {
     /// The partition table could not be read.
     PartitionTable(partitions::Error),
@@ -72,3 +73,13 @@ fn open(
     FlashStore::new(BlockingAsync::new(storage), range)
         .map_err(EspFlashStoreError::InvalidPartition)
 }
+
+// The built-in store's error must implement `core::error::Error`, so that
+// `provision::Error` can report it (`Display`, `source()`).
+const _: () = {
+    fn assert_error<E: core::error::Error>() {}
+    fn check() {
+        assert_error::<<EspFlashStore<'static> as super::Store>::Error>();
+    }
+    let _ = check;
+};

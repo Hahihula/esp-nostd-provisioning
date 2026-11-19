@@ -145,7 +145,8 @@ pub fn has_section(text: &str, schema: &Schema) -> bool {
 
 /// Remove the section of `schema` from `text` (e.g. after it was applied).
 ///
-/// Returns `None` if nothing but comments and blank lines would remain.
+/// Returns `None` if nothing but blank lines and the device's own
+/// [`FILE_HEADER`] would remain; the user's comments are kept.
 pub fn remove_section(text: &str, schema: &Schema) -> Option<String> {
     let mut out = String::new();
     let mut in_section = false;
@@ -157,7 +158,9 @@ pub fn remove_section(text: &str, schema: &Schema) -> Option<String> {
         if in_section {
             continue;
         }
-        if !matches!(classify(line), Line::Blank) {
+        // Anything but blank lines and the header the device wrote itself
+        // (including the user's own comments) keeps the file.
+        if !line.trim().is_empty() && line.trim() != FILE_HEADER {
             meaningful = true;
         }
         out.push_str(line);
@@ -165,6 +168,9 @@ pub fn remove_section(text: &str, schema: &Schema) -> Option<String> {
     }
     meaningful.then_some(out)
 }
+
+/// First line of a provisioning file created by the device.
+pub const FILE_HEADER: &str = "# Device provisioning file.";
 
 /// A commented-out template section for `request.schema`.
 ///
@@ -266,7 +272,13 @@ mod tests {
             remove_section(text, &WIFI).as_deref(),
             Some("# header\n[mqtt]\nhost = b\n")
         );
-        assert_eq!(remove_section("# c\n[wifi]\nssid = a\n", &WIFI), None);
+        // The user's comments keep the file; the device's own header does not.
+        assert_eq!(
+            remove_section("# c\n[wifi]\nssid = a\n", &WIFI).as_deref(),
+            Some("# c\n")
+        );
+        let generated = alloc::format!("{FILE_HEADER}\n\n[wifi]\nssid = a\n");
+        assert_eq!(remove_section(&generated, &WIFI), None);
     }
 
     #[test]

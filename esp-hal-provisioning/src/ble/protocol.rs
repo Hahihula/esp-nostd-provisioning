@@ -58,6 +58,7 @@ const SEQ_MASK: u8 = 0x3f;
 
 /// Framing error while reassembling a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameError {
     /// A chunk was lost or duplicated.
     OutOfSequence,
@@ -136,6 +137,7 @@ pub fn chunks(message: &[u8], max_chunk: usize) -> impl Iterator<Item = Vec<u8>>
 
 /// A request from the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClientMessage {
     /// Send the schema.
     GetSchema,
@@ -210,6 +212,7 @@ pub fn values_from(
 
 /// Status reported to the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum State {
     /// Ready to receive values.
     Waiting,

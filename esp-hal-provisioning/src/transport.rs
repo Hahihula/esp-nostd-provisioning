@@ -54,7 +54,8 @@ pub trait Transport {
     /// fail validation or verification.
     async fn collect(&mut self, request: &Request<'_>) -> Result<Values, Self::Error>;
 
-    /// Called once the values were verified and saved.
+    /// Called once the values were verified and saved. An error is only
+    /// logged: the device is provisioned either way.
     async fn finished(&mut self, _schema: &Schema) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -87,11 +88,34 @@ impl<T: Transport + ?Sized> Transport for &mut T {
 
 /// Error of a combined transport `(A, B)`.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum EitherError<A, B> {
     /// Error of the first transport.
     First(A),
     /// Error of the second transport.
     Second(B),
+}
+
+impl<A: core::fmt::Display, B: core::fmt::Display> core::fmt::Display for EitherError<A, B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::First(e) => e.fmt(f),
+            Self::Second(e) => e.fmt(f),
+        }
+    }
+}
+
+impl<A, B> core::error::Error for EitherError<A, B>
+where
+    A: core::error::Error + 'static,
+    B: core::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::First(e) => Some(e),
+            Self::Second(e) => Some(e),
+        }
+    }
 }
 
 /// Run two transports concurrently; the first one to deliver values wins.

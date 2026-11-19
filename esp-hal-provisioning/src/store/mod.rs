@@ -14,7 +14,7 @@ use crate::{Schema, Values};
 #[cfg(feature = "flash-store")]
 mod flash;
 #[cfg(feature = "flash-store")]
-pub use flash::FlashStore;
+pub use flash::{FlashStore, FlashStoreError};
 
 #[cfg(feature = "esp-flash")]
 mod esp;

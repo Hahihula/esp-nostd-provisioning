@@ -9,7 +9,10 @@ use alloc::string::String;
 use core::fmt;
 
 /// Maximum length (in bytes) of a single stored value.
-pub const MAX_VALUE_LEN: u16 = 256;
+pub const MAX_VALUE_LEN: usize = 256;
+
+// Field length limits are stored as `u16`.
+const _: () = assert!(MAX_VALUE_LEN <= u16::MAX as usize);
 
 /// Maximum length (in bytes) of a storage key, `"{namespace}/{field key}"`.
 pub const MAX_KEY_LEN: usize = 64;
@@ -90,6 +93,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 
 /// The type of a field, which drives validation and how transports render it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldKind {
     /// Free-form text.
     Text {
@@ -237,8 +241,8 @@ impl Field {
     ///
     /// If `min` is greater than the (capped) `max`.
     pub const fn with_len(mut self, min: u16, max: u16) -> Self {
-        let max = if max > MAX_VALUE_LEN {
-            MAX_VALUE_LEN
+        let max = if max as usize > MAX_VALUE_LEN {
+            MAX_VALUE_LEN as u16
         } else {
             max
         };
@@ -350,6 +354,7 @@ pub fn parse_bool(s: &str) -> Option<bool> {
 /// Why a value was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum ValidationError {
     /// The field is required but the value is empty.
     Required,
@@ -496,7 +501,7 @@ mod tests {
             f.kind,
             FieldKind::Text {
                 min_len: 0,
-                max_len: MAX_VALUE_LEN
+                max_len: MAX_VALUE_LEN as u16
             }
         );
     }

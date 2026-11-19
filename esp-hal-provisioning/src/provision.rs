@@ -1,5 +1,5 @@
 use alloc::{format, string::String, vec::Vec};
-use core::fmt::Debug;
+use core::fmt::Display;
 
 use crate::{
     Choice, FieldKind, Request, Schema, Store, Transport, Values, Verify,
@@ -20,6 +20,7 @@ pub struct Options<'a> {
 /// Provisioning error.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error<S, T> {
     /// The store failed.
     Store(S),
@@ -29,17 +30,29 @@ pub enum Error<S, T> {
     TooManyAttempts,
 }
 
-impl<S: Debug, T: Debug> core::fmt::Display for Error<S, T> {
+impl<S: Display, T: Display> Display for Error<S, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Store(e) => write!(f, "storage error: {e:?}"),
-            Self::Transport(e) => write!(f, "transport error: {e:?}"),
+            Self::Store(e) => write!(f, "storage error: {e}"),
+            Self::Transport(e) => write!(f, "transport error: {e}"),
             Self::TooManyAttempts => f.write_str("too many failed provisioning attempts"),
         }
     }
 }
 
-impl<S: Debug, T: Debug> core::error::Error for Error<S, T> {}
+impl<S, T> core::error::Error for Error<S, T>
+where
+    S: core::error::Error + 'static,
+    T: core::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Store(e) => Some(e),
+            Self::Transport(e) => Some(e),
+            Self::TooManyAttempts => None,
+        }
+    }
+}
 
 /// Make sure `store` holds valid values for `schema`, provisioning them over
 /// `transport` if necessary.
@@ -130,7 +143,14 @@ where
         }
 
         save(store, schema, &values).await.map_err(Error::Store)?;
-        transport.finished(schema).await.map_err(Error::Transport)?;
+        // The device is provisioned at this point: failing to tell the user
+        // (e.g. the console was unplugged) must not turn success into an error.
+        if let Err(e) = transport.finished(schema).await {
+            warn!(
+                "could not report success: {}",
+                alloc::format!("{e:?}").as_str()
+            );
+        }
         info!("'{}' provisioned", schema.namespace);
         return Ok(values);
     }
@@ -554,6 +574,52 @@ mod tests {
         update_defaults(&SCHEMA, &mut defaults, &submitted);
         assert_eq!(defaults.get("n"), Some("3"), "invalid value not offered");
         assert_eq!(defaults.get("name"), Some("dev"));
+    }
+
+    /// Transport whose success notification fails.
+    struct FailsToFinish(Scripted);
+    impl Transport for FailsToFinish {
+        type Error = &'static str;
+        async fn collect(&mut self, req: &Request<'_>) -> Result<Values, Self::Error> {
+            self.0.collect(req).await
+        }
+        async fn finished(&mut self, _: &Schema) -> Result<(), Self::Error> {
+            Err("console unplugged")
+        }
+    }
+
+    #[test]
+    fn failing_success_notification_is_not_an_error() {
+        block_on(async {
+            let mut store = MemoryStore::new();
+            let mut t = FailsToFinish(Scripted::new(&[&[("name", "dev"), ("n", "3")]]));
+            let r = provision(
+                &SCHEMA,
+                &mut store,
+                &mut t,
+                &mut NoVerify,
+                &Options::default(),
+            )
+            .await;
+            assert!(r.is_ok());
+            assert!(load(&mut store, &SCHEMA).await.unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn error_display_and_source_use_the_inner_error() {
+        use core::error::Error as _;
+        #[derive(Debug)]
+        struct Inner;
+        impl Display for Inner {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("flash is gone")
+            }
+        }
+        impl core::error::Error for Inner {}
+        let e: Error<Inner, core::convert::Infallible> = Error::Store(Inner);
+        assert_eq!(alloc::format!("{e}"), "storage error: flash is gone");
+        assert!(e.source().unwrap().is::<Inner>());
     }
 
     #[test]

@@ -119,8 +119,8 @@ port = 1883
 - If the values are rejected (syntax error, failed validation, or wrong Wi-Fi
   password), the reason is written to **`SETUPERR.TXT`** and the device waits
   for the file to change.
-- After success the section is **removed** from the card (the file is deleted
-  when nothing else is left) and its old contents are overwritten in place
+- After success the section is **removed** from the card (other sections and
+  your own comments are kept; the file is deleted when nothing else is left) and its old contents are overwritten in place
   (best effort, see [Secrets](#secrets)).
   See `AfterUse` for other policies.
 

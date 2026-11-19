@@ -6,6 +6,7 @@ use embedded_io_async::{Read, Write};
 
 /// How typed characters are echoed back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Echo {
     /// Echo characters as typed.
     Plain,

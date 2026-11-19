@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A tuple transport keeps running when one of its transports fails; it only fails when both do.
 - After a rejected attempt (failed validation or verification) the submission's valid fields are offered as defaults on the next attempt.
 - `Cli`'s error type is now `cli::CliError` (`Io` or `Eof`).
+- Public enums are `#[non_exhaustive]` (except `ble::json::Json` and `transport::EitherError`).
+- `FlashStore`'s error type is now `store::FlashStoreError`, which implements `Display` and `core::error::Error`.
+- `provision::Error` and `EitherError` implement `Display` through the inner errors' `Display`, and `core::error::Error::source()` returns the inner error.
+- `schema::MAX_VALUE_LEN` is a `usize`, like `MAX_KEY_LEN`.
+- `repository` points at <https://github.com/Hahihula/esp-nostd-provisioning>; `documentation` added.
 - WEP networks are no longer offered (the station configuration cannot connect to them).
 - Choice fields without `allow_custom` are checked against the offered options in the core, for every transport.
 - `FlashStore` uses a word-aligned scratch buffer (avoids a 4 KiB stack fallback in `esp-storage`) sized from `sequential-storage`'s item overhead.
@@ -47,4 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BLE device names are truncated on character boundaries (non-ASCII names could panic).
 - The CLI no longer spins when the console reports end of stream (a 0 byte read).
 - The web page no longer accumulates duplicate `<datalist>` elements on re-render.
+- An optional value (e.g. the Wi-Fi password) can now be cleared when re-provisioning: type `-` in the CLI, or tick "Remove the stored value" on the web page. Before, a device could not be moved to an open network.
+- Invalid UTF-8 at the CLI's "Save?" prompt no longer counts as "yes".
+- `provision()` no longer fails after the values were saved when the transport cannot report success (`Transport::finished` errors are logged).
+- Applying a `SETUP.TXT` section keeps the user's own comments; the file is only deleted when nothing but the device's header is left.
 - Partition end address overflow check in `store::partition_store()`/`nvs_store()`.

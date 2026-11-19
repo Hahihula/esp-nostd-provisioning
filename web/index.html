@@ -74,7 +74,7 @@
 
   <footer>
     Values are sent unencrypted over Bluetooth; provision in a trusted environment.
-    Protocol: <a href="https://github.com/esp-rs/esp-hal-community">esp-hal-provisioning</a> BLE v1.
+    Protocol: <a href="https://github.com/Hahihula/esp-nostd-provisioning">esp-hal-provisioning</a> BLE v1.
   </footer>
 </main>
 
@@ -232,7 +232,19 @@ function inputFor(f) {
       toggle.textContent = show ? "Hide" : "Show";
     };
     row.append(input, toggle);
-    return row;
+    if (!(f.has_value && !f.required)) return row;
+    // An optional secret with a stored value: "empty" means keep, so clearing
+    // it (e.g. switching to an open network) needs an explicit choice.
+    const wrap = document.createElement("span");
+    const clear = document.createElement("label");
+    clear.className = "check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.clear = f.key;
+    box.onchange = () => { input.disabled = box.checked; if (box.checked) input.value = ""; };
+    clear.append(box, document.createTextNode(" Remove the stored value"));
+    wrap.append(row, clear);
+    return wrap;
   }
   return input;
 }
@@ -268,9 +280,11 @@ function onDisconnected() {
 $("form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const values = {};
+  const cleared = new Set([...$("fields").querySelectorAll("[data-clear]")].filter((b) => b.checked).map((b) => b.dataset.clear));
   for (const el of $("fields").querySelectorAll("[data-key]")) {
     const field = schema.fields.find((f) => f.key === el.dataset.key);
     if (el.type === "checkbox") values[field.key] = el.checked;
+    else if (cleared.has(field.key)) values[field.key] = ""; // an empty value clears it
     else if (field.kind === "secret" && field.has_value && el.value === "") continue; // keep current
     else {
       // The device limits are in bytes; maxLength counts UTF-16 units.

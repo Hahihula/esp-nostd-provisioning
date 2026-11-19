@@ -11,8 +11,9 @@
 //! - **Rejected values** (bad syntax, failed validation or verification,
 //!   e.g. wrong Wi-Fi password): the reason is written to `SETUPERR.TXT` and
 //!   the device waits until the file changes.
-//! - **Success:** the section is removed from the file (the file is deleted
-//!   when nothing else is left), so secrets do not stay on the card. See
+//! - **Success:** the section is removed from the file, so secrets do not
+//!   stay on the card. Other sections and your own comments are kept; the
+//!   file is deleted only when nothing else is left. See
 //!   [`AfterUse`].
 //!
 //! The transport is storage agnostic: it works on any [`FileSystem`]. With the
@@ -82,8 +83,10 @@ impl<F: FileSystem + ?Sized> FileSystem for &mut F {
 
 /// What happens to the provisioning file once its values were accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AfterUse {
-    /// Remove the applied section; delete the file if nothing else is left. (Default)
+    /// Remove the applied section, keeping other sections and comments; delete
+    /// the file if nothing else is left. (Default)
     RemoveSection,
     /// Delete the whole file.
     DeleteFile,
@@ -179,7 +182,7 @@ impl<F: FileSystem> FileTransport<F> {
         let text = match existing {
             Some(text) if format::has_section(text, request.schema) => return,
             Some(text) if !text.trim().is_empty() => format!("{}\n\n{template}", text.trim_end()),
-            _ => format!("# Device provisioning file.\n\n{template}"),
+            _ => format!("{}\n\n{template}", format::FILE_HEADER),
         };
         match self.fs.write(self.config.file_name, text.as_bytes()).await {
             Ok(()) => info!("wrote provisioning template to {}", self.config.file_name),
@@ -439,9 +442,20 @@ mod tests {
     #[test]
     fn deletes_file_when_nothing_is_left() {
         let fs = MemFs::default();
-        fs.put("SETUP.TXT", "# my card\n[wifi]\nssid = home\n");
+        fs.put(
+            "SETUP.TXT",
+            "# Device provisioning file.\n\n[wifi]\nssid = home\n",
+        );
         run(&fs, fast(), &mut NoVerify);
         assert_eq!(fs.file("SETUP.TXT"), None);
+    }
+
+    #[test]
+    fn keeps_the_users_comments() {
+        let fs = MemFs::default();
+        fs.put("SETUP.TXT", "# my card\n[wifi]\nssid = home\n");
+        run(&fs, fast(), &mut NoVerify);
+        assert_eq!(fs.file("SETUP.TXT").as_deref(), Some("# my card\n"));
     }
 
     #[test]

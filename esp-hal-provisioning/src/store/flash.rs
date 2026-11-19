@@ -13,7 +13,7 @@ use crate::schema::{MAX_KEY_LEN, MAX_VALUE_LEN};
 /// Scratch space for one item: the key (plus its 2 byte length prefix), the
 /// value and sequential-storage's item header (checked in [`FlashStore::new`]),
 /// with headroom for word padding.
-const BUFFER_LEN: usize = (MAX_KEY_LEN + 2 + MAX_VALUE_LEN as usize + 64).next_multiple_of(32);
+const BUFFER_LEN: usize = (MAX_KEY_LEN + 2 + MAX_VALUE_LEN + 64).next_multiple_of(32);
 
 /// The scratch buffer is word aligned: `esp-storage` falls back to a 4 KiB
 /// stack buffer for every access through an unaligned slice.
@@ -26,6 +26,20 @@ type Uncached = Cache<
     sequential_storage::cache::Uncached,
     String,
 >;
+
+/// Error of [`FlashStore`]: a `sequential-storage` error, with `Display` and
+/// `core::error::Error` even when the flash driver's error has neither.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct FlashStoreError<E>(pub sequential_storage::Error<E>);
+
+impl<E: core::fmt::Debug> core::fmt::Display for FlashStoreError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "flash storage error: {:?}", self.0)
+    }
+}
+
+impl<E: core::fmt::Debug> core::error::Error for FlashStoreError<E> {}
 
 /// A [`Store`] persisting values in a flash region via `sequential-storage`.
 ///
@@ -50,7 +64,7 @@ impl<F: MultiwriteNorFlash> FlashStore<F> {
         let config = MapConfig::try_new(range)?;
         let overhead = MapStorage::<String, F, Uncached>::item_overhead_size() as usize;
         assert!(
-            overhead + (MAX_KEY_LEN + 2 + MAX_VALUE_LEN as usize).next_multiple_of(F::WRITE_SIZE)
+            overhead + (MAX_KEY_LEN + 2 + MAX_VALUE_LEN).next_multiple_of(F::WRITE_SIZE)
                 <= BUFFER_LEN,
             "FlashStore scratch buffer too small for this flash"
         );
@@ -61,8 +75,8 @@ impl<F: MultiwriteNorFlash> FlashStore<F> {
     }
 
     /// Erase the whole region, removing all stored values.
-    pub async fn erase_all(&mut self) -> Result<(), sequential_storage::Error<F::Error>> {
-        self.map.erase_all().await
+    pub async fn erase_all(&mut self) -> Result<(), FlashStoreError<F::Error>> {
+        self.map.erase_all().await.map_err(FlashStoreError)
     }
 
     /// Release the underlying flash.
@@ -72,7 +86,7 @@ impl<F: MultiwriteNorFlash> FlashStore<F> {
 }
 
 impl<F: MultiwriteNorFlash> Store for FlashStore<F> {
-    type Error = sequential_storage::Error<F::Error>;
+    type Error = FlashStoreError<F::Error>;
 
     async fn read(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
         let key = String::from(key);
@@ -94,7 +108,7 @@ impl<F: MultiwriteNorFlash> Store for FlashStore<F> {
             });
         // Don't leave secrets in the scratch buffer.
         self.buffer.0.fill(0);
-        result
+        result.map_err(FlashStoreError)
     }
 
     async fn write(&mut self, key: &str, value: &str) -> Result<(), Self::Error> {
@@ -104,12 +118,15 @@ impl<F: MultiwriteNorFlash> Store for FlashStore<F> {
             .store_item(&mut self.buffer.0, &key, &value.as_bytes())
             .await;
         self.buffer.0.fill(0);
-        result
+        result.map_err(FlashStoreError)
     }
 
     async fn remove(&mut self, key: &str) -> Result<(), Self::Error> {
         let key = String::from(key);
-        self.map.remove_item(&mut self.buffer.0, &key).await
+        self.map
+            .remove_item(&mut self.buffer.0, &key)
+            .await
+            .map_err(FlashStoreError)
     }
 }
 
@@ -200,7 +217,7 @@ mod tests {
             let flash = RamFlash(vec![0xff; 8 * 1024]);
             let mut store = FlashStore::new(flash, 0..8 * 1024).unwrap();
             let key = "k".repeat(MAX_KEY_LEN);
-            let value = "v".repeat(MAX_VALUE_LEN as usize);
+            let value = "v".repeat(MAX_VALUE_LEN);
             store.write(&key, &value).await.unwrap();
             assert_eq!(store.read(&key).await.unwrap(), Some(value));
         });

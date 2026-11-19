@@ -38,6 +38,7 @@ pub const MAX_FILE_LEN: usize = 16 * 1024;
 
 /// Error of [`SdFileSystem`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SdError<E: core::error::Error> {
     /// File system or card error.
     Fs(embedded_sdmmc::Error<E>),
