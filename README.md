@@ -82,6 +82,25 @@ Custom settings, re-provisioning triggers, the SD card file format, BLE
 hosting on your own domain, storage details, and the feature and chip tables
 are all in **[esp-hal-provisioning/README.md](esp-hal-provisioning/README.md)**.
 
+## Resource usage
+
+Rough cost of provisioning: what it adds to an application compared with the
+same application without it (ESP32-C3, release build, `esp-hal` 1.2.2,
+`esp-radio` 1.0.0-beta.1):
+
+| Path | Flash | Static RAM |
+|---|---|---|
+| Console, custom settings | +56 KiB | +2.2 KiB |
+| Console, Wi-Fi | +71 KiB | +2.4 KiB |
+| SD card + console, Wi-Fi | +118 KiB | +4.0 KiB |
+| BLE + console, Wi-Fi (includes the whole BLE stack) | +321 KiB | +51 KiB, plus a 32 KiB heap region |
+
+The numbers include everything provisioning pulls in (console UART, flash
+storage, and for BLE the controller and host stack), so an application that
+already uses some of it pays less. Other chips are similar, except BLE on the
+ESP32-C6/H2, which adds about 455 KiB of flash because of a larger BLE
+controller library.
+
 ## Supported chips
 
 | Chip | Wi-Fi | BLE | SD (SPI) | SD (SDMMC) |
