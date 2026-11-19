@@ -48,13 +48,42 @@ pub struct Cli<IO> {
 enum Prompt {
     Value(String),
     Restart,
+    Eof,
+}
+
+enum Confirm {
+    Yes,
+    No,
+    Eof,
 }
 
 enum Input {
     Line(String),
     Cancelled,
     InvalidUtf8,
+    Eof,
 }
+
+/// Error of the [`Cli`] transport.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CliError<E> {
+    /// The serial port failed.
+    Io(E),
+    /// The serial port reported end of stream (e.g. a closed TCP console).
+    Eof,
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for CliError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "console error: {e}"),
+            Self::Eof => f.write_str("console closed"),
+        }
+    }
+}
+
+impl<E: core::fmt::Debug + core::fmt::Display> core::error::Error for CliError<E> {}
 
 impl<IO: Read + Write> Cli<IO> {
     /// Create a CLI transport with the default configuration.
@@ -93,6 +122,7 @@ impl<IO: Read + Write> Cli<IO> {
                 Err(_) => Ok(Input::InvalidUtf8),
             },
             Ok(Line::Cancelled) => Ok(Input::Cancelled),
+            Ok(Line::Eof) => Ok(Input::Eof),
             Err(e) => Err(e),
         };
         // Wipe a potential secret from the scratch buffer.
@@ -158,6 +188,7 @@ impl<IO: Read + Write> Cli<IO> {
             let input = match self.read(MAX_VALUE_LEN as usize, echo).await? {
                 Input::Line(input) => input,
                 Input::Cancelled => return Ok(Prompt::Restart),
+                Input::Eof => return Ok(Prompt::Eof),
                 Input::InvalidUtf8 => {
                     self.print("  ! invalid characters, please type it again\r\n")
                         .await?;
@@ -191,11 +222,7 @@ impl<IO: Read + Write> Cli<IO> {
         }
     }
 
-    async fn confirm(
-        &mut self,
-        schema: &Schema,
-        values: &Values,
-    ) -> Result<Option<bool>, IO::Error> {
+    async fn confirm(&mut self, schema: &Schema, values: &Values) -> Result<Confirm, IO::Error> {
         let mut summary = String::from("\r\nSummary:\r\n");
         for field in schema.fields {
             let shown = match values.get(field.key) {
@@ -210,13 +237,15 @@ impl<IO: Read + Write> Cli<IO> {
         loop {
             let answer = match self.read(8, Echo::Plain).await? {
                 Input::Line(answer) => answer,
-                Input::Cancelled => return Ok(None),
+                Input::Cancelled => return Ok(Confirm::No),
+                Input::Eof => return Ok(Confirm::Eof),
                 Input::InvalidUtf8 => String::new(),
             };
             match answer.trim() {
-                "" => return Ok(Some(true)),
+                "" => return Ok(Confirm::Yes),
                 a => match crate::schema::parse_bool(a) {
-                    Some(b) => return Ok(Some(b)),
+                    Some(true) => return Ok(Confirm::Yes),
+                    Some(false) => return Ok(Confirm::No),
                     None => self.print("Save? [Y/n] ").await?,
                 },
             }
@@ -225,9 +254,25 @@ impl<IO: Read + Write> Cli<IO> {
 }
 
 impl<IO: Read + Write> Transport for Cli<IO> {
-    type Error = IO::Error;
+    type Error = CliError<IO::Error>;
 
     async fn collect(&mut self, req: &Request<'_>) -> Result<Values, Self::Error> {
+        self.collect_values(req)
+            .await
+            .map_err(CliError::Io)?
+            .ok_or(CliError::Eof)
+    }
+
+    async fn finished(&mut self, schema: &Schema) -> Result<(), Self::Error> {
+        self.print(&format!("{} settings saved.\r\n", schema.title))
+            .await
+            .map_err(CliError::Io)
+    }
+}
+
+impl<IO: Read + Write> Cli<IO> {
+    /// One provisioning round; `None` when the console reported end of stream.
+    async fn collect_values(&mut self, req: &Request<'_>) -> Result<Option<Values>, IO::Error> {
         'restart: loop {
             self.print(&format!(
                 "\r\n=== {} provisioning ===\r\n",
@@ -245,24 +290,21 @@ impl<IO: Read + Write> Transport for Cli<IO> {
                     Prompt::Value(v) if v.is_empty() => {}
                     Prompt::Value(v) => values.set(field.key, v),
                     Prompt::Restart => continue 'restart,
+                    Prompt::Eof => return Ok(None),
                 }
             }
 
             if self.config.confirm {
                 match self.confirm(req.schema, &values).await? {
-                    Some(true) => {}
-                    Some(false) | None => continue 'restart,
+                    Confirm::Yes => {}
+                    Confirm::No => continue 'restart,
+                    Confirm::Eof => return Ok(None),
                 }
             }
 
             self.print("Applying...\r\n").await?;
-            return Ok(values);
+            return Ok(Some(values));
         }
-    }
-
-    async fn finished(&mut self, schema: &Schema) -> Result<(), Self::Error> {
-        self.print(&format!("{} settings saved.\r\n", schema.title))
-            .await
     }
 }
 
@@ -431,6 +473,46 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(v.get("pw"), Some("password1"));
             assert!(cli.into_inner().output().contains("invalid characters"));
+        });
+    }
+
+    /// Serial port that reports end of stream after the scripted input.
+    struct ClosingIo(MockIo, u32);
+    impl embedded_io_async::ErrorType for ClosingIo {
+        type Error = Infallible;
+    }
+    impl Read for ClosingIo {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if self.0.input_exhausted() {
+                self.1 += 1;
+                assert!(self.1 < 10, "reading again after end of stream");
+                return Ok(0);
+            }
+            self.0.read(buf).await
+        }
+    }
+    impl Write for ClosingIo {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.0.write(buf).await
+        }
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn end_of_stream_ends_collect() {
+        block_on(async {
+            let mut cli = Cli::new(ClosingIo(MockIo::new(b"1\r"), 0));
+            let req = Request {
+                schema: &SCHEMA,
+                choices: &[],
+                current: None,
+                attempt: 1,
+                last_error: None,
+            };
+            assert!(matches!(cli.collect(&req).await, Err(CliError::Eof)));
+            assert_eq!(cli.into_inner().1, 1, "read only once after end of stream");
         });
     }
 

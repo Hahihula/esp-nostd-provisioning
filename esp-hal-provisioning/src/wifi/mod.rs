@@ -92,7 +92,7 @@ impl core::fmt::Debug for WifiCredentials {
 pub enum Security {
     /// No password.
     Open,
-    /// WEP (legacy).
+    /// WEP (legacy, broken). Not offered: WEP keys are not supported.
     Wep,
     /// WPA and/or WPA2 Personal.
     Wpa2,
@@ -131,13 +131,15 @@ pub struct Network {
     pub security: Security,
 }
 
-/// Deduplicate networks by SSID (keeping the strongest), drop hidden and
-/// unsupported ones (enterprise, OWE, …, which a password cannot unlock), sort
-/// by signal strength and keep at most `max`.
+/// Deduplicate networks by SSID (keeping the strongest), drop hidden ones and
+/// those the station configuration cannot connect to (WEP, enterprise,
+/// OWE, …), sort by signal strength and keep at most `max`.
 pub fn best_networks(networks: impl IntoIterator<Item = Network>, max: usize) -> Vec<Network> {
     let mut best: Vec<Network> = Vec::new();
     for network in networks {
-        if network.ssid.is_empty() || network.security == Security::Unsupported {
+        if network.ssid.is_empty()
+            || matches!(network.security, Security::Wep | Security::Unsupported)
+        {
             continue;
         }
         match best.iter_mut().find(|n| n.ssid == network.ssid) {
@@ -211,7 +213,9 @@ mod tests {
         corp.security = Security::Unsupported;
         let mut new = net("new", -50);
         new.security = Security::Wpa3;
-        let best = best_networks([corp, new], 10);
+        let mut old = net("old", -40);
+        old.security = Security::Wep;
+        let best = best_networks([corp, new, old], 10);
         assert_eq!(best.len(), 1);
         assert!(network_choices(&best)[0].label.ends_with("WPA3"));
     }

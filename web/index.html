@@ -211,7 +211,8 @@ function inputFor(f) {
       list.id = "options-" + f.key;
       for (const o of f.options) { const opt = new Option(o.label, o.value); list.append(opt); }
       input.setAttribute("list", list.id);
-      document.body.append(list);
+      // Inside the fields container, so re-rendering the form replaces it.
+      $("fields").append(list);
     }
     if (f.current !== undefined) input.value = f.current;
     if (f.kind === "secret" && f.has_value) input.placeholder = "Leave empty to keep the current value";

@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A tuple transport keeps running when one of its transports fails; it only fails when both do.
-- After a failed verification the rejected values are offered as defaults on the next attempt.
+- After a rejected attempt (failed validation or verification) the submission's valid fields are offered as defaults on the next attempt.
+- `Cli`'s error type is now `cli::CliError` (`Io` or `Eof`).
+- WEP networks are no longer offered (the station configuration cannot connect to them).
 - Choice fields without `allow_custom` are checked against the offered options in the core, for every transport.
 - `FlashStore` uses a word-aligned scratch buffer (avoids a 4 KiB stack fallback in `esp-storage`) sized from `sequential-storage`'s item overhead.
 - The file transport retries rejected content and rewrites the template after the card was removed and re-inserted.
@@ -42,4 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The CLI no longer turns input with invalid UTF-8 into an empty value (an open Wi-Fi network); it asks again. Length limits no longer split a character.
 - `wifi::connect` disconnects after every failed attempt, not only after timeouts.
+- BLE device names are truncated on character boundaries (non-ASCII names could panic).
+- The CLI no longer spins when the console reports end of stream (a 0 byte read).
+- The web page no longer accumulates duplicate `<datalist>` elements on re-render.
 - Partition end address overflow check in `store::partition_store()`/`nvs_store()`.

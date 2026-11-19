@@ -22,6 +22,8 @@ pub(crate) enum Line {
     Done,
     /// Ctrl-C was pressed.
     Cancelled,
+    /// The IO reported end of stream (a read returned 0 bytes).
+    Eof,
 }
 
 const CTRL_C: u8 = 0x03;
@@ -70,6 +72,12 @@ impl LineReader {
                 io.flush().await?;
                 self.pending_end = io.read(&mut self.pending).await?;
                 self.pending_start = 0;
+                if self.pending_end == 0 {
+                    // `embedded-io` defines a 0 byte read as end of stream:
+                    // reading again would spin forever.
+                    buf.clear();
+                    return Ok(Line::Eof);
+                }
             }
             while self.pending_start < self.pending_end {
                 let byte = self.pending[self.pending_start];
@@ -183,6 +191,7 @@ mod tests {
                 match r.read_line(&mut io, &mut buf, 64, echo).await.unwrap() {
                     Line::Done => lines.push(buf.clone()),
                     Line::Cancelled => lines.push(b"<cancel>".to_vec()),
+                    Line::Eof => lines.push(b"<eof>".to_vec()),
                 }
             }
             (lines, io.output())

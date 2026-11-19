@@ -38,19 +38,24 @@
 //!
 //! ## Feature flags
 //!
-//! | Feature       | Default | Description                                               |
-//! |---------------|---------|-----------------------------------------------------------|
-//! | `cli`         | ✅      | Interactive provisioning over a serial console            |
-//! | `file`        |         | Provisioning from a text file ([`file::FileTransport`])   |
-//! | `sdcard`      |         | FAT SD cards (SPI / SDMMC) for the `file` transport       |
-//! | `ble`         |         | BLE GATT transport + Web Bluetooth page ([`ble`])         |
-//! | `esp-ble`     |         | `ble::controller()` on the chip's radio (needs a chip)     |
-//! | `coex`        |         | Wi-Fi + BLE coexistence (verify Wi-Fi over BLE)           |
-//! | `wifi`        | ✅      | Wi-Fi scanning / verification via `esp-radio` (needs chip) |
-//! | `flash-store` | ✅      | [`store::FlashStore`] backed by `sequential-storage`      |
-//! | `log-04`      |         | Logging through `log`                                     |
-//! | `defmt`       |         | Logging through `defmt`                                   |
-//! | `esp32…`      |         | Target chip, required together with `wifi`                |
+//! | Feature       | Default | Description                                                         |
+//! |---------------|---------|---------------------------------------------------------------------|
+//! | `cli`         | ✅      | Interactive provisioning over a serial console ([`cli`])            |
+//! | `file`        |         | Provisioning from a text file on any [`file::FileSystem`]           |
+//! | `sdcard`      |         | FAT SD cards (SPI / SDMMC) for the file transport; implies `file`   |
+//! | `ble`         |         | BLE GATT transport for the Web Bluetooth page ([`ble`])             |
+//! | `esp-ble`     |         | `ble::controller()` on the chip's radio; implies `ble`¹             |
+//! | `coex`        |         | Wi-Fi + BLE coexistence (verify Wi-Fi over BLE); implies `wifi` and `esp-ble`¹ |
+//! | `wifi`        | ✅      | Wi-Fi scanning and verification via `esp-radio`¹                    |
+//! | `flash-store` | ✅      | [`store::FlashStore`] on any async `MultiwriteNorFlash`             |
+//! | `esp-flash`   | ✅      | `store::nvs_store()` / `store::partition_store()` on the internal flash; implies `flash-store`¹ |
+//! | `log-04`      |         | Logging through `log`                                               |
+//! | `defmt`       |         | Logging through `defmt`                                             |
+//! | `esp32`, `esp32c2`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32c61`, `esp32h2`, `esp32p4`, `esp32s2`, `esp32s3`, `esp32s31` | | Target chip |
+//!
+//! ¹ Requires a chip feature. Chips without Wi-Fi (`esp32h2`, `esp32p4`) need
+//! `default-features = false`; BLE is available on esp32c2, esp32c3, esp32c5,
+//! esp32c6, esp32c61, esp32h2 and esp32s3.
 #![no_std]
 // The traits use `async fn` without `Send` bounds on purpose: Embassy
 // executors on these chips are single threaded, so futures never cross

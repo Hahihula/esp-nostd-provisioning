@@ -48,7 +48,9 @@ impl<S: Debug, T: Debug> core::error::Error for Error<S, T> {}
 ///    are complete and valid.
 /// 2. Otherwise values are collected over `transport`, validated against the
 ///    schema and checked by `verifier`. On failure the user is asked again,
-///    together with the reason, with the rejected values offered as defaults.
+///    together with the reason. The rejected submission's fields that are
+///    valid on their own are offered as defaults (for validation and
+///    verification failures alike); invalid fields keep the previous default.
 /// 3. Accepted values are saved and returned.
 ///
 /// # Cancellation
@@ -80,8 +82,9 @@ where
     info!("provisioning '{}'", schema.namespace);
     let mut choices = options.choices.to_vec();
     let mut last_error: Option<String> = None;
-    // Values rejected by the verifier: offered as defaults on the next attempt.
-    let mut rejected: Option<Values> = None;
+    // Defaults offered to the transport: the stored values, updated with the
+    // valid fields of every rejected submission.
+    let mut defaults = stored;
     let mut attempt = 0;
 
     loop {
@@ -90,9 +93,7 @@ where
             return Err(Error::TooManyAttempts);
         }
 
-        let current = rejected
-            .as_ref()
-            .or((!stored.is_empty()).then_some(&stored));
+        let current = (!defaults.is_empty()).then_some(&defaults);
         let request = Request {
             schema,
             choices: &choices,
@@ -108,6 +109,7 @@ where
         if let Err(e) = validate_all(schema, &values, &choices) {
             warn!("provisioned values rejected");
             last_error = Some(e);
+            update_defaults(schema, &mut defaults, &values);
             continue;
         }
 
@@ -123,7 +125,7 @@ where
         if let Err(e) = verdict {
             warn!("verification failed");
             last_error = Some(e.0);
-            rejected = Some(values);
+            update_defaults(schema, &mut defaults, &values);
             continue;
         }
 
@@ -131,6 +133,23 @@ where
         transport.finished(schema).await.map_err(Error::Transport)?;
         info!("'{}' provisioned", schema.namespace);
         return Ok(values);
+    }
+}
+
+/// Take over the fields of a rejected submission that are valid on their own.
+/// An optional field submitted empty is cleared; invalid fields and missing
+/// required fields keep their previous default.
+fn update_defaults(schema: &Schema, defaults: &mut Values, submitted: &Values) {
+    for field in schema.fields {
+        match submitted.get(field.key) {
+            Some(value) if !value.is_empty() => {
+                if field.validate(value).is_ok() {
+                    defaults.set(field.key, value);
+                }
+            }
+            _ if !field.required => defaults.remove(field.key),
+            _ => {}
+        }
     }
 }
 
@@ -502,6 +521,39 @@ mod tests {
             assert_eq!(t.seen, [None, Some("first".to_string())]);
             assert_eq!(verifier.refreshed, 1);
         });
+    }
+
+    #[test]
+    fn invalid_submission_keeps_only_valid_fields_as_defaults() {
+        block_on(async {
+            let mut store = MemoryStore::new();
+            // "n" = 42 is out of range: "name" is kept as a default, "n" is not.
+            let mut t = SeesCurrent {
+                inner: Scripted::new(&[
+                    &[("name", "dev"), ("n", "42")],
+                    &[("name", "dev"), ("n", "4")],
+                ]),
+                seen: Vec::new(),
+            };
+            provision(
+                &SCHEMA,
+                &mut store,
+                &mut t,
+                &mut NoVerify,
+                &Options::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(t.seen, [None, Some("dev".to_string())]);
+        });
+        let mut defaults = Values::new();
+        defaults.set("n", "3");
+        let mut submitted = Values::new();
+        submitted.set("name", "dev");
+        submitted.set("n", "42");
+        update_defaults(&SCHEMA, &mut defaults, &submitted);
+        assert_eq!(defaults.get("n"), Some("3"), "invalid value not offered");
+        assert_eq!(defaults.get("name"), Some("dev"));
     }
 
     #[test]

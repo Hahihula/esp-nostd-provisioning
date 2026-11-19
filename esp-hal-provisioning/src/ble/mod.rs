@@ -106,7 +106,7 @@ where
     // which use `static` storage) so `run` can be called more than once.
     let mut rx_store = [0u8; VALUE_CAPACITY];
     let mut tx_store = [0u8; VALUE_CAPACITY];
-    let name = &config.name[..config.name.len().min(22)];
+    let name = truncate_utf8(config.name, 22);
     let mut table: AttributeTable<'_, Mutex, ATTRIBUTES> = AttributeTable::new();
     {
         let mut gap = table.add_service(Service::new(service::GAP));
@@ -167,6 +167,16 @@ where
     }
 }
 
+/// The longest prefix of `s` that is at most `max` bytes and ends on a
+/// character boundary.
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Make `address` a valid random static address (two most significant bits set).
 fn random_static(mut address: [u8; 6]) -> [u8; 6] {
     address[5] |= 0xc0;
@@ -205,7 +215,7 @@ impl<'p, 's, 'v, C: Controller> BleTransport<'p, 's, 'v, C> {
     async fn connect(&mut self) {
         // Little endian, as used in advertising data.
         let service = [SERVICE.to_le_bytes()];
-        let name = &self.name.as_bytes()[..self.name.len().min(29)];
+        let name = truncate_utf8(self.name, 29).as_bytes();
         let mut adv_data = [0u8; 31];
         let mut scan_data = [0u8; 31];
         let adv_len = AdStructure::encode_slice(
@@ -387,6 +397,17 @@ mod tests {
         assert_eq!(parse_uuid(protocol::RX_UUID), RX);
         assert_eq!(parse_uuid(protocol::TX_UUID), TX);
         assert_eq!(SERVICE.to_le_bytes()[15], 0x4b);
+    }
+
+    #[test]
+    fn names_are_truncated_on_character_boundaries() {
+        // 'é' is 2 bytes and straddles byte 22.
+        let name = "ESP-Provisioning-Kücheé";
+        assert_eq!(name.len(), 25);
+        let cut = truncate_utf8(name, 22);
+        assert!(cut.len() <= 22);
+        assert_eq!(cut, "ESP-Provisioning-Küch");
+        assert_eq!(truncate_utf8("short", 22), "short");
     }
 
     #[test]
